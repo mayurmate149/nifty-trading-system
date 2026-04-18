@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 /**
@@ -43,11 +43,13 @@ export default function AuthCallbackPage() {
   }, [searchParams, router]);
 
   return (
-    <div className="flex min-h-screen items-center justify-center">
-      <div className="text-center">
-        <div className="mb-4 text-2xl">🔄</div>
-        <p className="text-gray-400">Authenticating with 5paisa...</p>
-      </div>
-    </div>
+     <Suspense fallback={<div>Loading...</div>}>
+        <div className="flex min-h-screen items-center justify-center">
+          <div className="text-center">
+            <div className="mb-4 text-2xl">🔄</div>
+            <p className="text-gray-400">Authenticating with 5paisa...</p>
+          </div>
+        </div>
+    </Suspense>
   );
 }
