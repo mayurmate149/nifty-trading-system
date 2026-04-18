@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, Suspense } from "react";
+import { Suspense, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 /**
@@ -10,7 +10,7 @@ import { useRouter, useSearchParams } from "next/navigation";
  * Extracts requestToken from URL and exchanges it for session.
  */
 
-export default function AuthCallbackPage() {
+function CallbackContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -43,13 +43,19 @@ export default function AuthCallbackPage() {
   }, [searchParams, router]);
 
   return (
-     <Suspense fallback={<div>Loading...</div>}>
-        <div className="flex min-h-screen items-center justify-center">
-          <div className="text-center">
-            <div className="mb-4 text-2xl">🔄</div>
-            <p className="text-gray-400">Authenticating with 5paisa...</p>
-          </div>
-        </div>
+    <div className="flex min-h-screen items-center justify-center">
+      <div className="text-center">
+        <div className="mb-4 text-2xl">🔄</div>
+        <p className="text-gray-400">Authenticating with 5paisa...</p>
+      </div>
+    </div>
+  );
+}
+
+export default function AuthCallbackPage() {
+  return (
+    <Suspense>
+      <CallbackContent />
     </Suspense>
   );
 }
