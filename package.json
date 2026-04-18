@@ -1,0 +1,47 @@
+{
+  "name": "nifty-trading-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Rule-based options trading assistant for Nifty/BankNifty via 5paisa Xstream API",
+  "scripts": {
+    "dev": "next dev",
+    "dev:sim": "cd simulator && node server.js",
+    "dev:full": "concurrently \"npm run dev:sim\" \"npm run dev\"",
+    "sim:test": "node simulator/_test_full.js",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "test": "vitest",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.50.0",
+    "class-variance-authority": "^0.7.0",
+    "clsx": "^2.1.0",
+    "jose": "^5.6.0",
+    "lucide-react": "^0.400.0",
+    "next": "^14.2.0",
+    "pino": "^9.2.0",
+    "pino-pretty": "^11.2.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "recharts": "^2.12.0",
+    "tailwind-merge": "^2.3.0",
+    "ws": "^8.17.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.45.0",
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@types/ws": "^8.5.0",
+    "autoprefixer": "^10.4.0",
+    "eslint": "^8.57.0",
+    "eslint-config-next": "^14.2.0",
+    "postcss": "^8.4.0",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.5.0",
+    "vitest": "^1.6.0"
+  }
+}
