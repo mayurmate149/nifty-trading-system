@@ -13,6 +13,7 @@
  */
 
 import { useQuery } from "@tanstack/react-query";
+import { useMarketIndicatorsSSE } from "../useMarketIndicatorsSSE";
 import { MarketHeader } from "@/components/MarketHeader";
 import { PnLChart } from "@/components/PnLChart";
 import { PayoffDiagram } from "@/components/PayoffDiagram";
@@ -25,11 +26,7 @@ async function fetchAnalytics() {
   return res.json();
 }
 
-async function fetchIndicators() {
-  const res = await fetch("/api/v1/market/indicators");
-  if (!res.ok) throw new Error("Failed to fetch indicators");
-  return res.json();
-}
+// fetchIndicators removed; replaced by useMarketIndicatorsSSE
 
 export default function DashboardPage() {
   const { data: analytics, isLoading: analyticsLoading } = useQuery({
@@ -38,11 +35,9 @@ export default function DashboardPage() {
     refetchInterval: 5000,
   });
 
-  const { data: indicators } = useQuery({
-    queryKey: ["indicators"],
-    queryFn: fetchIndicators,
-    refetchInterval: 5000,
-  });
+
+  // Market indicators via SSE
+  const indicators = useMarketIndicatorsSSE();
 
   const portfolio = analytics?.portfolio;
   const greeks = analytics?.greeks;

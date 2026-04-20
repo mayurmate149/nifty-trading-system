@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withAuth } from "@/server/middleware/auth";
-import { fetchOptionsChain, fetchLiveSpotData, fetchMarketSnapshot, fetchOHLC } from "@/server/market-data/rest";
+import { fetchOptionsChain, fetchMarketSnapshot, fetchOHLC } from "@/server/market-data/rest";
+import { XstreamWSClient } from "@/server/market-data/ws-client";
 import { classifyTrend } from "@/server/market-data/trend";
 import { calculateSupportResistance } from "@/server/market-data/support-resistance";
 import { computeIVPercentile } from "@/server/market-data/analytics";
@@ -50,17 +51,36 @@ export async function POST(request: NextRequest) {
         expiry = expiry || snapshot.expiry;
         bars = ohlc;
       } else {
-        const [spotData, ohlc] = await Promise.all([
-          fetchLiveSpotData(session.accessToken),
-          fetchOHLC(session.accessToken, "NIFTY", "1d", 30),
-        ]);
-        spot = spotData.nifty;
-        prevClose = spotData.niftyPrevClose || spot;
-        vix = spotData.vix;
+        // --- Use WebSocket client for live spot data ---
+        let ws = (globalThis as any).__suggestWSClient as XstreamWSClient | undefined;
+        if (!ws) {
+          ws = new XstreamWSClient(session.accessToken);
+          ws.connect();
+          ws.subscribe(["NIFTY"]);
+          (globalThis as any).__suggestWSClient = ws;
+        }
+
+        // Wait for a tick if not present
+        let tick = (ws as any).latestTick as any;
+        if (!tick) {
+          tick = await new Promise((resolve) => {
+            const handler = (t: any) => {
+              (ws as any).latestTick = t;
+              ws.offTick(handler);
+              resolve(t);
+            };
+            ws.onTick(handler);
+            // Timeout fallback
+            setTimeout(() => resolve({ symbol: "NIFTY", ltp: 0, oi: 0, volume: 0, timestamp: Date.now() }), 2000);
+          });
+        }
+        spot = tick.ltp;
+        prevClose = tick.prevClose || spot;
+        vix = tick.vix || 0;
         const snapshot = await fetchMarketSnapshot();
         daysToExpiry = snapshot.daysToExpiry;
         expiry = expiry || snapshot.expiry;
-        bars = ohlc;
+        bars = await fetchOHLC(session.accessToken, "NIFTY", "1d", 30);
       }
 
       if (spot === 0) {

@@ -29,6 +29,7 @@
 import { AutoExitConfig, AutoExitState, RiskSummary } from "@/types/risk";
 import { Position } from "@/types/position";
 import { getPositions, placeOrder, getMargin, computeMarginFromPositions } from "@/server/broker-proxy";
+import { XstreamWSClient } from "@/server/market-data/ws-client";
 import { sendNotification, pushEvent } from "@/server/risk/notifier";
 
 // ─── Persist state across Next.js HMR (dev) ─────
@@ -282,9 +283,9 @@ export async function evaluateExitRules(positions: Position[], brokerUsedMargin?
     });
     sendNotification({
       type: "TRAIL_UPDATE",
-      title: `📈 Trailing SL → ${newSL.toFixed(1)}%`,
-      message: `Portfolio P&L at +${portfolioPnlPct.toFixed(1)}%, SL moved from ${currentSL.toFixed(1)}% to ${newSL.toFixed(1)}%`,
-      data: { previousSL: currentSL, newSL, portfolioPnlPct },
+      title: `📈 Trailing SL Updated`,
+      message: `SL moved from ${currentSL.toFixed(1)}% → ${newSL.toFixed(1)}% | Portfolio P&L: +${portfolioPnlPct.toFixed(2)}% | Peak: +${g.__peakPortfolioPnlPct?.toFixed(2) ?? "-"}%`,
+      data: { previousSL: currentSL, newSL, portfolioPnlPct, peakPnlPct: g.__peakPortfolioPnlPct },
     });
   }
 
@@ -425,8 +426,8 @@ async function executeExitAll(
   // Summary notification
   sendNotification({
     type: "EXIT_TRIGGER",
-    title: `${reasonLabels[reason]} — ALL EXITED`,
-    message: `${succeeded}/${positions.length} positions exited (${failed} failed) | Portfolio P&L: ${portfolioPnlPct.toFixed(2)}% (₹${totalPnl.toFixed(0)})`,
+    title: `🚨 ${reasonLabels[reason]} — ALL EXITED`,
+    message: `Exited all positions. ${succeeded}/${positions.length} succeeded, ${failed} failed.\nPortfolio P&L: ${portfolioPnlPct.toFixed(2)}% (₹${totalPnl.toFixed(0)})`,
     data: { reason, portfolioPnlPct, totalPnl, succeeded, failed },
   });
 
@@ -473,33 +474,52 @@ export function startEngine(credentials: { accessToken: string; clientCode: stri
     data: { config: cfg },
   });
 
-  g.__autoExitInterval = setInterval(async () => {
+  // --- WebSocket-based live tick engine ---
+  const ws = new XstreamWSClient(credentials.accessToken);
+  ws.connect();
+
+  // Subscribe to all watched position symbols
+  const subscribeToWatched = () => {
+    const symbols = Array.from(watchedPositions.values())
+      .map((s) => s.positionId)
+      .filter(Boolean);
+    if (symbols.length > 0) ws.subscribe(symbols);
+  };
+  subscribeToWatched();
+
+  // Listen for ticks and update engine logic
+  ws.onTick(async (tick) => {
+    // On every tick, fetch latest positions and margin, then evaluate exit rules
     try {
       if (!g.__autoExitCredentials) return;
       if (watchedPositions.size === 0) return;
-
       const creds = {
         accessToken: g.__autoExitCredentials.accessToken,
         clientCode: g.__autoExitCredentials.clientCode,
       };
-
-      // Fetch positions and margin in parallel
       const [positions, margin] = await Promise.all([
         getPositions(creds),
         getMargin(creds),
       ]);
-
       await evaluateExitRules(positions, margin.usedMargin);
     } catch (error: any) {
       console.error("[AUTO-EXIT] Engine tick error:", error.message);
     }
-  }, 1000);
+  });
+
+  // Store ws client for cleanup if needed
+  (g as any).__autoExitWSClient = ws;
 }
 
 export function stopEngine(): void {
   if (g.__autoExitInterval) {
     clearInterval(g.__autoExitInterval);
     g.__autoExitInterval = null;
+  }
+  // Disconnect WebSocket client if running
+  if ((g as any).__autoExitWSClient) {
+    try { (g as any).__autoExitWSClient.disconnect(); } catch {}
+    (g as any).__autoExitWSClient = null;
   }
   g.__autoExitRunning = false;
   g.__autoExitCredentials = null;

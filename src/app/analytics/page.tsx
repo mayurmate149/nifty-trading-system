@@ -10,7 +10,9 @@
  */
 
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useAnalyticsSummarySSE } from "../useAnalyticsSummarySSE";
+import { useOptionsChainSSE } from "../useOptionsChainSSE";
+import { useMarketIndicatorsSSE } from "../useMarketIndicatorsSSE";
 import { MarketHeader } from "@/components/MarketHeader";
 import { OptionsChainTable } from "@/components/OptionsChainTable";
 import { PCRGauge } from "@/components/PCRGauge";
@@ -22,45 +24,28 @@ import type { OptionsChainResponse, MarketIndicators } from "@/types/market";
 
 type TabKey = "chain" | "indicators" | "heatmap" | "greeks";
 
-async function fetchIndicators(): Promise<MarketIndicators> {
-  const res = await fetch("/api/v1/market/indicators");
-  if (!res.ok) throw new Error("Failed to fetch indicators");
-  return res.json();
-}
+// fetchIndicators removed; replaced by useMarketIndicatorsSSE
 
-async function fetchOptionsChain(symbol: string): Promise<OptionsChainResponse> {
-  const res = await fetch(`/api/v1/market/options-chain?symbol=${symbol}`);
-  if (!res.ok) throw new Error("Failed to fetch options chain");
-  return res.json();
-}
+// fetchOptionsChain removed; replaced by useOptionsChainSSE
 
-async function fetchAnalytics() {
-  const res = await fetch("/api/v1/analytics/summary?section=all");
-  if (!res.ok) throw new Error("Failed to fetch analytics");
-  return res.json();
-}
+// fetchAnalytics removed; replaced by useAnalyticsSummarySSE
 
 export default function AnalyticsPage() {
   const [activeTab, setActiveTab] = useState<TabKey>("chain");
   const [symbol, setSymbol] = useState("NIFTY");
 
-  const { data: indicators } = useQuery({
-    queryKey: ["indicators"],
-    queryFn: fetchIndicators,
-    refetchInterval: 5000,
-  });
 
-  const { data: chain, isLoading: chainLoading } = useQuery({
-    queryKey: ["options-chain", symbol],
-    queryFn: () => fetchOptionsChain(symbol),
-    refetchInterval: 5000,
-  });
+  // Market indicators via SSE
+  const indicators = useMarketIndicatorsSSE();
 
-  const { data: analytics } = useQuery({
-    queryKey: ["analytics-full"],
-    queryFn: fetchAnalytics,
-    refetchInterval: 10000,
-  });
+
+  // Options chain via SSE
+  const chain = useOptionsChainSSE(symbol);
+  const chainLoading = !chain;
+
+
+  // Analytics summary via SSE
+  const analytics = useAnalyticsSummarySSE("all");
 
   const tabs: { key: TabKey; label: string; icon: string }[] = [
     { key: "chain", label: "Options Chain", icon: "📋" },

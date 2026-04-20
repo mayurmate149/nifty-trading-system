@@ -1,10 +1,15 @@
 "use client";
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+// ...existing code...
+import { useAutoExitSSE } from "../useAutoExitSSE";
 import { Position } from "@/types/position";
 import { MarketIndicators } from "@/types/market";
 import { MarketHeader } from "@/components/MarketHeader";
-import { useState, useEffect, useRef } from "react";
+import { useState } from "react";
+import { useEngineEvents } from "../useEngineEvents";
+import { usePositionsSSE } from "../usePositionsSSE";
+import { useMarketIndicatorsSSE } from "../useMarketIndicatorsSSE";
 
 /**
  * Positions Page — Phase 5
@@ -18,32 +23,9 @@ import { useState, useEffect, useRef } from "react";
 
 // ─── API helpers ─────────────────────────────
 
-async function fetchPositions(): Promise<{
-  positions: Position[];
-  margin: { availableMargin: number; usedMargin: number; netMargin: number; marginUtilizedPct: number } | null;
-  fundsBreakdown: {
-    buyPremium: number;
-    sellPremium: number;
-    spreadMargin: number;
-    nakedSellMargin: number;
-    netPremium: number;
-  } | null;
-}> {
-  const res = await fetch("/api/v1/positions");
-  if (!res.ok) throw new Error("Failed to fetch positions");
-  return res.json();
-}
+// fetchPositions removed; replaced by usePositionsSSE
 
-async function fetchAutoExitStatus(): Promise<{
-  engine: boolean;
-  watched: any[];
-  riskSummary: any;
-  portfolio: { peakPnlPct: number; currentTrailingSLPct: number } | null;
-}> {
-  const res = await fetch("/api/v1/auto-exit");
-  if (!res.ok) throw new Error("Failed to fetch auto-exit status");
-  return res.json();
-}
+// fetchAutoExitStatus removed; replaced by useAutoExitSSE
 
 async function toggleAutoExit(action: "enable" | "disable"): Promise<any> {
   const config: Record<string, number> = {
@@ -70,11 +52,7 @@ async function exitAllPositions(): Promise<any> {
   return res.json();
 }
 
-async function fetchIndicators(): Promise<MarketIndicators> {
-  const res = await fetch("/api/v1/market/indicators");
-  if (!res.ok) throw new Error("Failed to fetch indicators");
-  return res.json();
-}
+// fetchIndicators removed; replaced by useMarketIndicatorsSSE
 
 // ─── Event type ──────────────────────────────
 
@@ -90,30 +68,17 @@ interface AutoExitEvent {
 
 export default function PositionsPage() {
   const queryClient = useQueryClient();
-  const [events, setEvents] = useState<AutoExitEvent[]>([]);
   const [showExitConfirm, setShowExitConfirm] = useState(false);
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const events = useEngineEvents();
+  const { positions: ssePositions, margin: sseMargin } = usePositionsSSE();
 
-  // Positions query
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["positions"],
-    queryFn: fetchPositions,
-    refetchInterval: 3000,
-  });
 
-  // Auto-exit status query
-  const { data: autoExitData } = useQuery({
-    queryKey: ["autoExitStatus"],
-    queryFn: fetchAutoExitStatus,
-    refetchInterval: 5000,
-  });
+  // Auto-exit status via SSE
+  const autoExitData = useAutoExitSSE();
 
-  // Market indicators query
-  const { data: indicators } = useQuery({
-    queryKey: ["indicators"],
-    queryFn: fetchIndicators,
-    refetchInterval: 5000,
-  });
+
+  // Market indicators via SSE
+  const indicators = useMarketIndicatorsSSE();
 
   const engineRunning = autoExitData?.engine ?? false;
   const watchedCount = autoExitData?.watched?.length ?? 0;
@@ -136,59 +101,12 @@ export default function PositionsPage() {
     },
   });
 
-  // SSE connection for live events
-  useEffect(() => {
-    if (!engineRunning) {
-      // Close SSE when engine is off
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-        eventSourceRef.current = null;
-      }
-      return;
-    }
+  // Now handled by useEngineEvents hook
 
-    // Connect to SSE
-    const es = new EventSource("/api/v1/auto-exit/events");
-    eventSourceRef.current = es;
+  // Poll fallback removed; useEngineEvents handles all event state
 
-    es.onmessage = (e) => {
-      try {
-        const event: AutoExitEvent = JSON.parse(e.data);
-        setEvents((prev) => [event, ...prev].slice(0, 50)); // Keep last 50
-      } catch {
-        // heartbeat or invalid data
-      }
-    };
-
-    es.onerror = () => {
-      // EventSource will auto-reconnect
-    };
-
-    return () => {
-      es.close();
-      eventSourceRef.current = null;
-    };
-  }, [engineRunning]);
-
-  // Poll events as fallback when SSE is active
-  useEffect(() => {
-    if (!engineRunning) return;
-    // Initial load of existing events
-    fetch("/api/v1/auto-exit/events?poll=true")
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.events?.length) {
-          setEvents((prev) => {
-            const existingTimestamps = new Set(prev.map((e) => e.timestamp));
-            const newEvents = d.events.filter((e: AutoExitEvent) => !existingTimestamps.has(e.timestamp));
-            return [...newEvents.reverse(), ...prev].slice(0, 50);
-          });
-        }
-      })
-      .catch(() => {});
-  }, [engineRunning]);
-
-  if (isLoading) {
+  // Show loading if SSE positions are not yet available
+  if (!ssePositions) {
     return (
       <div className="flex min-h-screen items-center justify-center">
         <p className="text-gray-400">Loading positions...</p>
@@ -196,17 +114,10 @@ export default function PositionsPage() {
     );
   }
 
-  if (error) {
-    return (
-      <div className="flex min-h-screen items-center justify-center">
-        <p className="text-red-400">Error loading positions</p>
-      </div>
-    );
-  }
-
-  const positions = (data?.positions ?? []).filter((p: Position) => p.status === "OPEN");
-  const margin = data?.margin ?? null;
-  const funds = data?.fundsBreakdown ?? null;
+  const positions = (ssePositions ?? []).filter((p: Position) => p.status === "OPEN");
+  const margin = sseMargin ?? null;
+  // fundsBreakdown is not streamed via SSE; funds UI is disabled
+  const funds = null;
   const brokerMargin = (margin && margin.usedMargin > 0) ? margin.usedMargin : 0;
   const positionSum = positions.reduce((sum, p) => sum + p.capitalDeployed, 0);
   const totalCapital = brokerMargin > 0 ? brokerMargin : positionSum;
@@ -284,7 +195,7 @@ export default function PositionsPage() {
       </div>
 
       {/* Market Header */}
-      <MarketHeader indicators={indicators ?? null} />
+  <MarketHeader indicators={indicators ?? null} />
 
       {/* Engine Status Banner */}
       {/* Trailing SL Status */}
@@ -368,21 +279,6 @@ export default function PositionsPage() {
           <div className="text-sm text-gray-400">Margin Required</div>
           <div className="text-xl font-bold">
             ₹{brokerMargin.toLocaleString("en-IN", { maximumFractionDigits: 0 })}
-          </div>
-          {funds && funds.spreadMargin > 0 && (
-            <div className="text-xs text-gray-500 mt-1">
-              Spread: ₹{funds.spreadMargin.toLocaleString("en-IN", { maximumFractionDigits: 0 })}
-            </div>
-          )}
-        </div>
-        <div className="rounded-lg border border-gray-800 bg-gray-900 p-4">
-          <div className="text-sm text-gray-400">Premiums</div>
-          <div className="text-xl font-bold text-gray-300">
-            ₹{(funds?.netPremium ?? 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}
-            <span className="text-xs text-gray-500 ml-1">net</span>
-          </div>
-          <div className="text-xs text-gray-500 mt-1">
-            Sell: ₹{(funds?.sellPremium ?? 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })} | Buy: ₹{(funds?.buyPremium ?? 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}
           </div>
         </div>
         <div className="rounded-lg border border-gray-800 bg-gray-900 p-4">
@@ -504,14 +400,7 @@ export default function PositionsPage() {
         <div className="mt-8">
           <div className="mb-3 flex items-center justify-between">
             <h2 className="text-lg font-semibold">📋 Auto-Exit Event Log</h2>
-            {events.length > 0 && (
-              <button
-                onClick={() => setEvents([])}
-                className="text-xs text-gray-500 hover:text-gray-300"
-              >
-                Clear
-              </button>
-            )}
+            {/* Clear button removed; useEngineEvents is read-only. */}
           </div>
           <div className="max-h-64 overflow-y-auto rounded-lg border border-gray-800 bg-gray-900/50">
             {events.length === 0 ? (

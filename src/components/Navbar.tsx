@@ -14,10 +14,12 @@ const NAV_ITEMS = [
   { href: "/backtest", label: "🔬 Backtest" },
 ];
 
+
 export function Navbar() {
   const pathname = usePathname();
-  const { user, isAuthenticated, logout } = useAuth();
+  const { user, isAuthenticated, loading, logout } = useAuth();
 
+  if (loading) return null;
   if (!isAuthenticated) return null;
 
   return (

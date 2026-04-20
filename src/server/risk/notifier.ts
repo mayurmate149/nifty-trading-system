@@ -1,4 +1,11 @@
 /**
+ * Register an SSE listener and return an unsubscribe function.
+ */
+export function getEngineEvents(listener: (event: AutoExitEvent) => void): () => void {
+  addSSEClient(listener);
+  return () => removeSSEClient(listener);
+}
+/**
  * Notifier Module — Phase 5
  *
  * Central event system for auto-exit engine:
