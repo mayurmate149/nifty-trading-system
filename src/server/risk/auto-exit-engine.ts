@@ -390,7 +390,7 @@ async function executeExitAll(
         buySell: exitSide,
         exchange: pos.exchange || "N",
         exchangeType: pos.exchangeType || "D",
-        price: exitPrice
+        price: exitPrice,
         isIntraday: pos.isIntraday ?? false,
         atMarket: false,
       });
