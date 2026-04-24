@@ -369,10 +369,18 @@ async function executeExitAll(
     const exitQty = Math.abs(pos.quantity);
     const scripCode = parseInt(pos.positionId) || 0;
 
+    // Use LTP-based aggressive limit price for F&O exit (market orders rejected for derivatives)
+    // BUY-to-close  → bid slightly above LTP (+0.5) for faster fill
+    // SELL-to-close → ask slightly below LTP (-0.5) for faster fill
+    const ltp = pos.ltp || pos.avgPrice || 1;
+    const exitPrice = parseFloat(
+      (exitSide === "B" ? ltp + 0.5 : Math.max(ltp - 0.5, 0.05)).toFixed(2)
+    );
+
     console.log(
       `[AUTO-EXIT] 📤 Placing exit order: ${pos.symbol} | ScripCode: ${scripCode} | ` +
-      `Side: ${exitSide} | Qty: ${exitQty} | Exchange: ${pos.exchange || "N"} | ` +
-      `ExchType: ${pos.exchangeType || "D"} | Intraday: ${pos.isIntraday ?? false}`
+      `Side: ${exitSide} | Qty: ${exitQty} | Price: ${exitPrice} (LTP: ${ltp}) | ` +
+      `Exchange: ${pos.exchange || "N"} | ExchType: ${pos.exchangeType || "D"} | Intraday: ${pos.isIntraday ?? false}`
     );
 
     try {
@@ -382,17 +390,17 @@ async function executeExitAll(
         buySell: exitSide,
         exchange: pos.exchange || "N",
         exchangeType: pos.exchangeType || "D",
-        price: 0,
+        price: exitPrice
         isIntraday: pos.isIntraday ?? false,
-        atMarket: true,
+        atMarket: false,
       });
 
-      console.log(`[AUTO-EXIT] ✅ Exited ${pos.symbol} (${exitSide === "B" ? "BUY" : "SELL"} ${exitQty}) | Order: ${result?.ExchOrderID}`);
+      console.log(`[AUTO-EXIT] ✅ Exited ${pos.symbol} (${exitSide === "B" ? "BUY" : "SELL"} ${exitQty} @ ₹${exitPrice}) | Order: ${result?.ExchOrderID}`);
 
       pushEvent({
         type: "EXIT_EXECUTED",
         positionId: pos.positionId,
-        message: `Exited ${pos.symbol}: ${exitSide === "B" ? "BUY" : "SELL"} ${exitQty} @ market`,
+        message: `Exited ${pos.symbol}: ${exitSide === "B" ? "BUY" : "SELL"} ${exitQty} @ ₹${exitPrice}`,
         timestamp: Date.now(),
         data: { orderId: result?.ExchOrderID, ltp: pos.ltp, pl: pos.pl },
       });
