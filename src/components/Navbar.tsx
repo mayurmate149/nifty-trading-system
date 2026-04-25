@@ -7,7 +7,7 @@ import { useAuth } from "@/app/providers/AuthProvider";
 const NAV_ITEMS = [
   { href: "/dashboard", label: "🏠 Dashboard" },
   { href: "/positions", label: "📊 Positions" },
-  { href: "/analytics", label: "📈 Analytics" },
+  { href: "/option-chain-live", label: "📡 Option Chain" },
   { href: "/auto-scanner", label: "🔍 Scanner" },
   { href: "/scalp-ai", label: "🤖 Scalp AI" },
   { href: "/trade-suggestions", label: "🎯 Trades" },

@@ -846,6 +846,9 @@ function buildChainOutput(
     const ceGreeks = bsGreeks(spot, strike, T, r, ceSigma, true);
     const peGreeks = bsGreeks(spot, strike, T, r, peSigma, false);
 
+    const ceSc = (ce.ScripCode ?? (ce as any).scripCode ?? "").toString();
+    const peSc = (pe.ScripCode ?? (pe as any).scripCode ?? "").toString();
+
     return {
       strike,
       ce: {
@@ -855,6 +858,7 @@ function buildChainOutput(
         oi: ceOI,
         changeInOi: ceChgOI,
         volume: ceVol,
+        scripCode: ceSc || undefined,
         bidPrice: num(ce[f.bid]),
         askPrice: num(ce[f.ask]),
         greeks: ceGreeks,
@@ -866,6 +870,7 @@ function buildChainOutput(
         oi: peOI,
         changeInOi: peChgOI,
         volume: peVol,
+        scripCode: peSc || undefined,
         bidPrice: num(pe[f.bid]),
         askPrice: num(pe[f.ask]),
         greeks: peGreeks,

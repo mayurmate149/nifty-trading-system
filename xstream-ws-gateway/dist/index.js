@@ -77,6 +77,28 @@ wss.on("connection", (client) => {
         at: new Date().toISOString(),
     }));
     const remove = (0, xstream_upstream_js_1.onUpstreamMessage)(send);
+    client.on("message", (raw) => {
+        try {
+            const msg = JSON.parse(String(raw));
+            if (msg.type !== "market-feed-subscribe" || !Array.isArray(msg.instruments)) {
+                return;
+            }
+            const inst = [];
+            for (const x of msg.instruments) {
+                if (!x || typeof x.ScripCode !== "number" || x.ScripCode <= 0)
+                    continue;
+                inst.push({
+                    Exch: (x.Exch ?? "N").toString(),
+                    ExchType: (x.ExchType ?? "D").toString(),
+                    ScripCode: x.ScripCode,
+                });
+            }
+            (0, xstream_upstream_js_1.applyMarketFeedSubscriptions)((0, xstream_upstream_js_1.getLastClientCode)(), inst);
+        }
+        catch {
+            // ignore
+        }
+    });
     client.on("close", remove);
     client.on("error", remove);
 });

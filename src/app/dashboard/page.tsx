@@ -67,20 +67,12 @@ export default function DashboardPage() {
           <h1 className="text-2xl font-bold">🏠 Dashboard</h1>
           <p className="text-sm text-gray-500">Portfolio overview & market analysis</p>
         </div>
-        <div className="flex gap-2">
-          <Link
-            href="/positions"
-            className="rounded-lg bg-gray-800 px-4 py-2 text-sm font-medium text-gray-300 transition hover:bg-gray-700"
-          >
-            📊 Positions
-          </Link>
-          <Link
-            href="/analytics"
-            className="rounded-lg bg-blue-900/50 px-4 py-2 text-sm font-medium text-blue-400 transition hover:bg-blue-900/70"
-          >
-            📈 Analytics
-          </Link>
-        </div>
+        <Link
+          href="/positions"
+          className="rounded-lg bg-gray-800 px-4 py-2 text-sm font-medium text-gray-300 transition hover:bg-gray-700"
+        >
+          📊 Positions
+        </Link>
       </div>
 
       {/* Market Header */}

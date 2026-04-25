@@ -33,10 +33,12 @@ export function parse5paisaPayload(raw: string): Raw5paisaRow[] {
 export function toGatewayTick(row: Raw5paisaRow) {
   const token = Number(row.Token ?? NaN);
   if (!Number.isFinite(token)) return null;
+  const label = symbolForToken(token);
   return {
     type: "tick" as const,
+    kind: label ? ("index" as const) : ("option" as const),
     token,
-    symbol: symbolForToken(token),
+    symbol: label,
     exch: row.Exch,
     exchType: row.ExchType,
     lastRate: Number(row.LastRate ?? 0),
@@ -47,6 +49,11 @@ export function toGatewayTick(row: Raw5paisaRow) {
     low: Number(row.Low ?? 0),
     openRate: Number(row.OpenRate ?? 0),
     avgRate: Number(row.AvgRate ?? 0),
+    bidRate: Number(row.BidRate ?? 0),
+    bidQty: Number(row.BidQty ?? 0),
+    offRate: Number(row.OffRate ?? 0),
+    offQty: Number(row.OffQty ?? 0),
+    chgPcnt: row.ChgPcnt,
     time: row.Time,
     serverTs: Date.now(),
   };
@@ -57,3 +64,29 @@ export const DEFAULT_SUBSCRIPTIONS: { Exch: string; ExchType: string; ScripCode:
   { Exch: "N", ExchType: "C", ScripCode: TOKEN_BANKNIFTY },
   { Exch: "N", ExchType: "C", ScripCode: TOKEN_VIX },
 ];
+
+const MAX_MARKET_SUBS = Number(process.env.XSTREAM_MAX_INSTRUMENTS || 175);
+
+const key = (i: { Exch: string; ExchType: string; ScripCode: number }) =>
+  `${i.Exch}|${i.ExchType}|${i.ScripCode}`;
+
+/** Merges index defaults with F&O scrips; caps list for 5paisa WebSocket limits. */
+export function mergeWithDefaultSubscriptions(
+  extra: { Exch: string; ExchType: string; ScripCode: number }[],
+  max: number = MAX_MARKET_SUBS,
+) {
+  const map = new Map<string, { Exch: string; ExchType: string; ScripCode: number }>();
+  for (const d of DEFAULT_SUBSCRIPTIONS) {
+    map.set(key(d), d);
+  }
+  for (const e of extra) {
+    if (map.size >= max) break;
+    if (e && e.ScripCode > 0 && e.Exch && e.ExchType) {
+      const row = { Exch: e.Exch, ExchType: e.ExchType, ScripCode: e.ScripCode };
+      if (!map.has(key(row))) {
+        map.set(key(row), row);
+      }
+    }
+  }
+  return Array.from(map.values());
+}

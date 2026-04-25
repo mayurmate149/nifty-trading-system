@@ -4,6 +4,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.broadcastToBrowserClients = broadcastToBrowserClients;
+exports.getLastClientCode = getLastClientCode;
+exports.applyMarketFeedSubscriptions = applyMarketFeedSubscriptions;
 exports.getUpstreamState = getUpstreamState;
 exports.hasSessionCredentials = hasSessionCredentials;
 exports.onUpstreamState = onUpstreamState;
@@ -24,6 +26,7 @@ let attempt = 0;
 let lastAccess = "";
 let lastClientCode = "";
 let subOverride = parsers_js_1.DEFAULT_SUBSCRIPTIONS;
+let lastSubscribedSnapshot = [];
 function setState(s) {
     if (s === upstreamState)
         return;
@@ -52,6 +55,36 @@ function subscribeMarket(clientCode) {
         MarketFeedData: subOverride,
     };
     ws.send(JSON.stringify(payload));
+    lastSubscribedSnapshot = subOverride.map((x) => ({ ...x }));
+}
+function getLastClientCode() {
+    return lastClientCode;
+}
+/**
+ * Live subscription update from browser (see gateway WebSocket `market-feed-subscribe`).
+ * Unsubscribes previous set, then subscribes merged defaults + F&O scrips.
+ */
+function applyMarketFeedSubscriptions(clientCode, extra) {
+    const merged = (0, parsers_js_1.mergeWithDefaultSubscriptions)(extra);
+    const code = (clientCode || lastClientCode).trim();
+    if (!code)
+        return;
+    if (!lastAccess)
+        return;
+    if (!ws || ws.readyState !== ws_1.default.OPEN) {
+        subOverride = merged;
+        return;
+    }
+    if (lastSubscribedSnapshot.length > 0) {
+        ws.send(JSON.stringify({
+            Method: "MarketFeedV3",
+            Operation: "Unsubscribe",
+            ClientCode: code,
+            MarketFeedData: lastSubscribedSnapshot,
+        }));
+    }
+    subOverride = merged;
+    subscribeMarket(code);
 }
 function getUpstreamState() {
     return upstreamState;
@@ -69,11 +102,12 @@ function onUpstreamMessage(fn) {
 }
 function configureAndConnect(params) {
     if (params.instruments?.length) {
-        subOverride = params.instruments;
+        subOverride = (0, parsers_js_1.mergeWithDefaultSubscriptions)(params.instruments);
     }
     else {
         subOverride = parsers_js_1.DEFAULT_SUBSCRIPTIONS;
     }
+    lastSubscribedSnapshot = [];
     const nextToken = params.accessToken.trim();
     const nextCode = params.clientCode.trim();
     if (!nextToken || !nextCode) {
@@ -147,6 +181,7 @@ function stopUpstream() {
     }
     lastAccess = "";
     lastClientCode = "";
+    lastSubscribedSnapshot = [];
     if (ws) {
         try {
             ws.removeAllListeners();

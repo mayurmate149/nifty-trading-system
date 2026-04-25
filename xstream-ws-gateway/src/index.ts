@@ -15,6 +15,8 @@ import {
   getUpstreamState,
   hasSessionCredentials,
   stopUpstream,
+  applyMarketFeedSubscriptions,
+  getLastClientCode,
 } from "./xstream-upstream.js";
 import { setTradingSessionCookie, stopTradingSnapshotPoll } from "./trading-snapshot-poll.js";
 
@@ -92,6 +94,29 @@ wss.on("connection", (client) => {
     }),
   );
   const remove = onUpstreamMessage(send);
+  client.on("message", (raw) => {
+    try {
+      const msg = JSON.parse(String(raw)) as {
+        type?: string;
+        instruments?: { Exch?: string; ExchType?: string; ScripCode?: number }[];
+      };
+      if (msg.type !== "market-feed-subscribe" || !Array.isArray(msg.instruments)) {
+        return;
+      }
+      const inst: { Exch: string; ExchType: string; ScripCode: number }[] = [];
+      for (const x of msg.instruments) {
+        if (!x || typeof x.ScripCode !== "number" || x.ScripCode <= 0) continue;
+        inst.push({
+          Exch: (x.Exch ?? "N").toString(),
+          ExchType: (x.ExchType ?? "D").toString(),
+          ScripCode: x.ScripCode,
+        });
+      }
+      applyMarketFeedSubscriptions(getLastClientCode(), inst);
+    } catch {
+      // ignore
+    }
+  });
   client.on("close", remove);
   client.on("error", remove);
 });

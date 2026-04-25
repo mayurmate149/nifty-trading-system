@@ -6,6 +6,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -107,6 +108,12 @@ function mergeIndicators(
   };
 }
 
+/** Last tick per 5paisa token (indices + option scrips subscribed via `market-feed-subscribe`). */
+export type TickByToken = Record<
+  number,
+  { lastRate?: number; pClose?: number; totalQty?: number; kind?: string; [k: string]: unknown }
+>;
+
 const MarketTicksContext = createContext<{
   connection: XstreamConnectionState;
   live: LiveIndexOverlay;
@@ -115,6 +122,10 @@ const MarketTicksContext = createContext<{
   hasTradingSnapshotOverWs: boolean;
   /** Auto-exit engine log, pushed as { type: "auto-exit-events" } from the gateway (replaces EventSource for that tab). */
   autoExitEventLog: AutoExitStreamEvent[];
+  /** Live LTP/volume per ScripCode (token) from Xstream `MarketFeedV3`. */
+  tickByToken: TickByToken;
+  /** Send JSON to xstream-ws-gateway (e.g. `{ type: "market-feed-subscribe", instruments: [...] }`). */
+  sendGatewayMessage: (msg: object) => void;
 } | null>(null);
 
 /** Pushes OAuth session token to xstream-ws-gateway so the feed can connect without static .env tokens. */
@@ -130,6 +141,7 @@ function XstreamGatewayRegister() {
 
 export function MarketTicksProvider({ children }: { children: React.ReactNode }) {
   const queryClient = useQueryClient();
+  const wsRef = useRef<WebSocket | null>(null);
   const url = process.env.NEXT_PUBLIC_XSTREAM_WS_URL?.trim() || "";
   const [connection, setConnection] = useState<XstreamConnectionState>(
     url ? "connecting" : "disabled",
@@ -137,7 +149,15 @@ export function MarketTicksProvider({ children }: { children: React.ReactNode })
   const [live, setLive] = useState<LiveIndexOverlay>({});
   const [hasTradingSnapshotOverWs, setHasTradingSnapshotOverWs] = useState(false);
   const [autoExitEventLog, setAutoExitEventLog] = useState<AutoExitStreamEvent[]>([]);
+  const [tickByToken, setTickByToken] = useState<TickByToken>({});
   const [retry, setRetry] = useState(0);
+
+  const sendGatewayMessage = useCallback((msg: object) => {
+    const w = wsRef.current;
+    if (w && w.readyState === WebSocket.OPEN) {
+      w.send(JSON.stringify(msg));
+    }
+  }, []);
 
   useEffect(() => {
     if (!url) {
@@ -146,14 +166,17 @@ export function MarketTicksProvider({ children }: { children: React.ReactNode })
     }
     setConnection("connecting");
     const ws = new WebSocket(url);
+    wsRef.current = ws;
 
     ws.onopen = () => {
       setConnection("open");
     };
     ws.onclose = () => {
+      wsRef.current = null;
       setConnection("closed");
       setHasTradingSnapshotOverWs(false);
       setAutoExitEventLog([]);
+      setTickByToken({});
     };
     ws.onerror = () => {
       setConnection("error");
@@ -162,6 +185,16 @@ export function MarketTicksProvider({ children }: { children: React.ReactNode })
       try {
         const m = JSON.parse(String(ev.data)) as GatewayMsg;
         if (m.type === "tick" && "token" in m) {
+          const tm = m as MsgTick & { token: number };
+          setTickByToken((prev) => ({
+            ...prev,
+            [tm.token]: {
+              lastRate: tm.lastRate,
+              pClose: tm.pClose,
+              totalQty: (m as { totalQty?: number }).totalQty,
+              kind: (m as { kind?: string }).kind,
+            },
+          }));
           setLive((p) => applyTick(p, m as MsgTick));
         }
         if (m.type === "snapshot" && m && typeof m === "object" && "data" in m) {
@@ -189,6 +222,7 @@ export function MarketTicksProvider({ children }: { children: React.ReactNode })
       }
     };
     return () => {
+      wsRef.current = null;
       ws.onopen = null;
       ws.onclose = null;
       ws.onerror = null;
@@ -220,8 +254,19 @@ export function MarketTicksProvider({ children }: { children: React.ReactNode })
       applyLiveToIndicators,
       hasTradingSnapshotOverWs,
       autoExitEventLog,
+      tickByToken,
+      sendGatewayMessage,
     }),
-    [url, connection, live, applyLiveToIndicators, hasTradingSnapshotOverWs, autoExitEventLog],
+    [
+      url,
+      connection,
+      live,
+      applyLiveToIndicators,
+      hasTradingSnapshotOverWs,
+      autoExitEventLog,
+      tickByToken,
+      sendGatewayMessage,
+    ],
   );
 
   return (

@@ -14,6 +14,8 @@ export interface OptionChainRow {
   volume: number;
   iv: number;
   ltp: number;
+  /** 5paisa ScripCode for Xstream `MarketFeedV3` (NSE F&O usually Exch N, ExchType D). */
+  scripCode?: string;
   bidPrice?: number;
   askPrice?: number;
   greeks?: OptionGreeks;
