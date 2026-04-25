@@ -63,7 +63,6 @@ export const api = {
         method: "POST",
         body: JSON.stringify(params),
       }),
-    scalpSignal: () => apiFetch("/strategy/scalp-signal"),
     autoScan: (capital: number = 200000) =>
       apiFetch(`/strategy/auto-scan?capital=${capital}`),
   },
