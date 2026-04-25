@@ -8,6 +8,7 @@
  */
 
 import { MarketIndicators } from "@/types/market";
+import { useMarketTicks } from "@/contexts/MarketTicksContext";
 
 interface MarketHeaderProps {
   indicators: MarketIndicators | null | undefined;
@@ -15,6 +16,8 @@ interface MarketHeaderProps {
 }
 
 export function MarketHeader({ indicators, bankNifty }: MarketHeaderProps) {
+  const rt = useMarketTicks();
+  const isLive = rt?.connection === "open";
   if (!indicators) {
     return (
       <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
@@ -88,6 +91,15 @@ export function MarketHeader({ indicators, bankNifty }: MarketHeaderProps) {
   ];
 
   return (
+    <>
+    <div className="mb-3 flex items-center justify-end gap-2 text-xs text-gray-500">
+      {isLive && (
+        <span className="inline-flex items-center gap-1 rounded border border-emerald-800/80 bg-emerald-950/40 px-2 py-0.5 font-medium text-emerald-400">
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+          Realtime (WS)
+        </span>
+      )}
+    </div>
     <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
       {cards.map((card, i) => (
         <div
@@ -106,5 +118,6 @@ export function MarketHeader({ indicators, bankNifty }: MarketHeaderProps) {
         </div>
       ))}
     </div>
+    </>
   );
 }

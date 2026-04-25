@@ -1,17 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withAuth } from "@/server/middleware/auth";
-import { getPositions, getMargin } from "@/server/broker-proxy";
+import { getPositions } from "@/server/broker-proxy";
 import {
   startEngine,
   stopEngine,
   exitAllNow,
   watchAllPositions,
   unwatchAll,
-  getWatchedPositions,
-  isEngineRunning,
-  computeRiskSummary,
-  getPortfolioState,
 } from "@/server/risk/auto-exit-engine";
+import { getAutoExitApiPayload } from "@/server/trading/auto-exit-payload";
 
 /**
  * POST /api/v1/auto-exit
@@ -99,41 +96,7 @@ export async function POST(request: NextRequest) {
  */
 export async function GET(request: NextRequest) {
   return withAuth(request, async (_req, session) => {
-    const running = isEngineRunning();
-    const watched = getWatchedPositions();
-
-    let riskSummary = null;
-    if (running) {
-      try {
-        const creds = {
-          accessToken: session.accessToken,
-          clientCode: session.clientCode,
-        };
-        const positions = await getPositions(creds);
-        let usedMargin = 0;
-        try {
-          const margin = await getMargin(creds);
-          usedMargin = margin.usedMargin;
-        } catch {
-          // margin fetch failed, engine will use fallback
-        }
-        riskSummary = computeRiskSummary(positions, usedMargin);
-      } catch {
-        // If fetching positions fails, still return engine status
-      }
-    }
-
-    return NextResponse.json({
-      engine: running,
-      watched: watched.map((w) => ({
-        positionId: w.positionId,
-        active: w.active,
-        currentSLPercent: w.currentSLPercent,
-        peakProfitPercent: w.peakProfitPercent,
-        config: w.config,
-      })),
-      riskSummary,
-      portfolio: getPortfolioState(),
-    });
+    const body = await getAutoExitApiPayload(session);
+    return NextResponse.json(body);
   });
 }

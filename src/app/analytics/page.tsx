@@ -11,6 +11,7 @@
 
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useMarketTicks } from "@/contexts/MarketTicksContext";
 import { MarketHeader } from "@/components/MarketHeader";
 import { OptionsChainTable } from "@/components/OptionsChainTable";
 import { PCRGauge } from "@/components/PCRGauge";
@@ -43,12 +44,18 @@ async function fetchAnalytics() {
 export default function AnalyticsPage() {
   const [activeTab, setActiveTab] = useState<TabKey>("chain");
   const [symbol, setSymbol] = useState("NIFTY");
+  const rt = useMarketTicks();
+  const hasWs = Boolean(process.env.NEXT_PUBLIC_XSTREAM_WS_URL?.trim());
+  const indicatorsFromWs =
+    hasWs && rt?.connection === "open" && (rt.hasTradingSnapshotOverWs ?? false);
 
   const { data: indicators } = useQuery({
     queryKey: ["indicators"],
     queryFn: fetchIndicators,
-    refetchInterval: 5000,
+    refetchInterval: indicatorsFromWs ? false : 5000,
+    staleTime: indicatorsFromWs ? 60_000 : 10_000,
   });
+  const mergedIndicators = rt?.applyLiveToIndicators(indicators) ?? indicators;
 
   const { data: chain, isLoading: chainLoading } = useQuery({
     queryKey: ["options-chain", symbol],
@@ -95,7 +102,10 @@ export default function AnalyticsPage() {
       </div>
 
       {/* Market Header Widgets */}
-      <MarketHeader indicators={indicators} bankNifty={analytics?.market?.bankNifty} />
+      <MarketHeader
+        indicators={mergedIndicators}
+        bankNifty={rt?.live?.bankNifty ?? analytics?.market?.bankNifty}
+      />
 
       {/* Chain Summary Bar */}
       {chain && chain.spot > 0 && (

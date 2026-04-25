@@ -1,24 +1,31 @@
 "use client";
 
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  useQuery,
+  useMutation,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 import { Position } from "@/types/position";
 import { MarketIndicators } from "@/types/market";
 import { MarketHeader } from "@/components/MarketHeader";
+import { useMarketTicks } from "@/contexts/MarketTicksContext";
+import type { AutoExitStreamEvent } from "@/types/auto-exit-stream";
 import { useState, useEffect, useRef } from "react";
 
 /**
  * Positions Page — Phase 5
  *
  * Displays active 5paisa derivatives positions with:
- * - Live P&L (color-coded, 2s auto-refresh)
+ * - Live P&L — pushed over WebSocket (gateway) when `NEXT_PUBLIC_XSTREAM_WS_URL` is set; else REST poll
  * - Auto-Exit toggle (enable/disable engine for all positions)
  * - Risk summary dashboard
- * - Live event log from SSE stream
+ * - Event log: WebSocket `auto-exit-events` from gateway, or EventSource to `/api/v1/auto-exit/events` as fallback
  */
 
 // ─── API helpers ─────────────────────────────
 
-async function fetchPositions(): Promise<{
+type PositionsBlock = {
   positions: Position[];
   margin: { availableMargin: number; usedMargin: number; netMargin: number; marginUtilizedPct: number } | null;
   fundsBreakdown: {
@@ -28,22 +35,18 @@ async function fetchPositions(): Promise<{
     nakedSellMargin: number;
     netPremium: number;
   } | null;
-}> {
-  const res = await fetch("/api/v1/positions");
-  if (!res.ok) throw new Error("Failed to fetch positions");
-  return res.json();
-}
+};
 
-async function fetchAutoExitStatus(): Promise<{
-  engine: boolean;
-  watched: any[];
-  riskSummary: any;
-  portfolio: { peakPnlPct: number; currentTrailingSLPct: number } | null;
-}> {
-  const res = await fetch("/api/v1/auto-exit");
-  if (!res.ok) throw new Error("Failed to fetch auto-exit status");
-  return res.json();
-}
+type TradingPageSnapshot = {
+  positions: PositionsBlock;
+  autoExit: {
+    engine: boolean;
+    watched: any[];
+    riskSummary: any;
+    portfolio: { peakPnlPct: number; currentTrailingSLPct: number } | null;
+  };
+  indicators: MarketIndicators;
+};
 
 async function toggleAutoExit(action: "enable" | "disable"): Promise<any> {
   const config: Record<string, number> = {
@@ -70,50 +73,43 @@ async function exitAllPositions(): Promise<any> {
   return res.json();
 }
 
-async function fetchIndicators(): Promise<MarketIndicators> {
-  const res = await fetch("/api/v1/market/indicators");
-  if (!res.ok) throw new Error("Failed to fetch indicators");
-  return res.json();
-}
-
-// ─── Event type ──────────────────────────────
-
-interface AutoExitEvent {
-  type: string;
-  positionId: string;
-  message: string;
-  timestamp: number;
-  data?: Record<string, any>;
+async function fetchTradingSnapshot(
+  queryClient: QueryClient,
+): Promise<TradingPageSnapshot> {
+  const res = await fetch("/api/v1/trading/snapshot");
+  if (!res.ok) throw new Error("Failed to fetch trading snapshot");
+  const data = (await res.json()) as TradingPageSnapshot;
+  queryClient.setQueryData(["indicators"], data.indicators);
+  return data;
 }
 
 // ─── Component ───────────────────────────────
 
 export default function PositionsPage() {
   const queryClient = useQueryClient();
-  const [events, setEvents] = useState<AutoExitEvent[]>([]);
+  const [sseEventLog, setSseEventLog] = useState<AutoExitStreamEvent[]>([]);
   const [showExitConfirm, setShowExitConfirm] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
 
-  // Positions query
+  const rt = useMarketTicks();
+  const hasWs = Boolean(process.env.NEXT_PUBLIC_XSTREAM_WS_URL?.trim());
+  const tradingOverWs = Boolean(
+    hasWs && rt?.connection === "open" && rt.hasTradingSnapshotOverWs,
+  );
+
+  const eventLog: AutoExitStreamEvent[] = tradingOverWs
+    ? (rt?.autoExitEventLog ?? [])
+    : sseEventLog;
+
+  // Initial load: REST. After gateway streams snapshot over WS, stop interval polling.
   const { data, isLoading, error } = useQuery({
-    queryKey: ["positions"],
-    queryFn: fetchPositions,
-    refetchInterval: 3000,
+    queryKey: ["tradingSnapshot"],
+    queryFn: () => fetchTradingSnapshot(queryClient),
+    refetchInterval: tradingOverWs ? false : 2500,
+    staleTime: tradingOverWs ? 60_000 : 2000,
   });
-
-  // Auto-exit status query
-  const { data: autoExitData } = useQuery({
-    queryKey: ["autoExitStatus"],
-    queryFn: fetchAutoExitStatus,
-    refetchInterval: 5000,
-  });
-
-  // Market indicators query
-  const { data: indicators } = useQuery({
-    queryKey: ["indicators"],
-    queryFn: fetchIndicators,
-    refetchInterval: 5000,
-  });
+  const mergedIndicators = rt?.applyLiveToIndicators(data?.indicators) ?? data?.indicators;
+  const autoExitData = data?.autoExit;
 
   const engineRunning = autoExitData?.engine ?? false;
   const watchedCount = autoExitData?.watched?.length ?? 0;
@@ -122,7 +118,8 @@ export default function PositionsPage() {
   const toggleMutation = useMutation({
     mutationFn: (action: "enable" | "disable") => toggleAutoExit(action),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["autoExitStatus"] });
+      queryClient.invalidateQueries({ queryKey: ["tradingSnapshot"] });
+      queryClient.invalidateQueries({ queryKey: ["indicators"] });
     },
   });
 
@@ -131,62 +128,61 @@ export default function PositionsPage() {
     mutationFn: exitAllPositions,
     onSuccess: () => {
       setShowExitConfirm(false);
-      queryClient.invalidateQueries({ queryKey: ["positions"] });
-      queryClient.invalidateQueries({ queryKey: ["autoExitStatus"] });
+      queryClient.invalidateQueries({ queryKey: ["tradingSnapshot"] });
+      queryClient.invalidateQueries({ queryKey: ["indicators"] });
     },
   });
 
-  // SSE connection for live events
+  // SSE for auto-exit log only when not using the gateway WebSocket stream
   useEffect(() => {
-    if (!engineRunning) {
-      // Close SSE when engine is off
+    if (tradingOverWs) {
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
         eventSourceRef.current = null;
       }
       return;
     }
-
-    // Connect to SSE
+    if (!engineRunning) {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+      return;
+    }
     const es = new EventSource("/api/v1/auto-exit/events");
     eventSourceRef.current = es;
-
     es.onmessage = (e) => {
       try {
-        const event: AutoExitEvent = JSON.parse(e.data);
-        setEvents((prev) => [event, ...prev].slice(0, 50)); // Keep last 50
+        const event = JSON.parse(e.data) as AutoExitStreamEvent;
+        setSseEventLog((prev) => [event, ...prev].slice(0, 50));
       } catch {
-        // heartbeat or invalid data
+        // ignore
       }
     };
-
-    es.onerror = () => {
-      // EventSource will auto-reconnect
-    };
-
     return () => {
       es.close();
       eventSourceRef.current = null;
     };
-  }, [engineRunning]);
+  }, [engineRunning, tradingOverWs]);
 
-  // Poll events as fallback when SSE is active
+  // One-time event bootstrap when on SSE (no WS)
   useEffect(() => {
-    if (!engineRunning) return;
-    // Initial load of existing events
+    if (tradingOverWs || !engineRunning) return;
     fetch("/api/v1/auto-exit/events?poll=true")
       .then((r) => r.json())
       .then((d) => {
         if (d.events?.length) {
-          setEvents((prev) => {
-            const existingTimestamps = new Set(prev.map((e) => e.timestamp));
-            const newEvents = d.events.filter((e: AutoExitEvent) => !existingTimestamps.has(e.timestamp));
+          setSseEventLog((prev) => {
+            const existing = new Set(prev.map((e) => e.timestamp));
+            const newEvents = (d.events as AutoExitStreamEvent[]).filter(
+              (e) => !existing.has(e.timestamp),
+            );
             return [...newEvents.reverse(), ...prev].slice(0, 50);
           });
         }
       })
       .catch(() => {});
-  }, [engineRunning]);
+  }, [engineRunning, tradingOverWs]);
 
   if (isLoading) {
     return (
@@ -204,9 +200,10 @@ export default function PositionsPage() {
     );
   }
 
-  const positions = (data?.positions ?? []).filter((p: Position) => p.status === "OPEN");
-  const margin = data?.margin ?? null;
-  const funds = data?.fundsBreakdown ?? null;
+  const posBlock = data?.positions;
+  const positions = (posBlock?.positions ?? []).filter((p: Position) => p.status === "OPEN");
+  const margin = posBlock?.margin ?? null;
+  const funds = posBlock?.fundsBreakdown ?? null;
   const brokerMargin = (margin && margin.usedMargin > 0) ? margin.usedMargin : 0;
   const positionSum = positions.reduce((sum, p) => sum + p.capitalDeployed, 0);
   const totalCapital = brokerMargin > 0 ? brokerMargin : positionSum;
@@ -284,7 +281,7 @@ export default function PositionsPage() {
       </div>
 
       {/* Market Header */}
-      <MarketHeader indicators={indicators ?? null} />
+      <MarketHeader indicators={mergedIndicators ?? null} />
 
       {/* Engine Status Banner */}
       {/* Trailing SL Status */}
@@ -500,13 +497,18 @@ export default function PositionsPage() {
       </div>
 
       {/* Event Log */}
-      {(engineRunning || events.length > 0) && (
+      {(engineRunning || eventLog.length > 0) && (
         <div className="mt-8">
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-lg font-semibold">📋 Auto-Exit Event Log</h2>
-            {events.length > 0 && (
+            <h2 className="text-lg font-semibold">
+              📋 Auto-Exit Event Log
+              {tradingOverWs && (
+                <span className="ml-2 text-xs font-normal text-emerald-500/90">(WebSocket)</span>
+              )}
+            </h2>
+            {!tradingOverWs && eventLog.length > 0 && (
               <button
-                onClick={() => setEvents([])}
+                onClick={() => setSseEventLog([])}
                 className="text-xs text-gray-500 hover:text-gray-300"
               >
                 Clear
@@ -514,12 +516,12 @@ export default function PositionsPage() {
             )}
           </div>
           <div className="max-h-64 overflow-y-auto rounded-lg border border-gray-800 bg-gray-900/50">
-            {events.length === 0 ? (
+            {eventLog.length === 0 ? (
               <div className="px-4 py-6 text-center text-sm text-gray-500">
                 No events yet. Engine is monitoring positions...
               </div>
             ) : (
-              events.map((evt, i) => (
+              eventLog.map((evt, i) => (
                 <div
                   key={`${evt.timestamp}-${i}`}
                   className="flex items-start gap-3 border-b border-gray-800/50 px-4 py-2 last:border-0"

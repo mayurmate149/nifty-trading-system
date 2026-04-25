@@ -13,6 +13,7 @@
  */
 
 import { useQuery } from "@tanstack/react-query";
+import { useMarketTicks } from "@/contexts/MarketTicksContext";
 import { MarketHeader } from "@/components/MarketHeader";
 import { PnLChart } from "@/components/PnLChart";
 import { PayoffDiagram } from "@/components/PayoffDiagram";
@@ -32,6 +33,11 @@ async function fetchIndicators() {
 }
 
 export default function DashboardPage() {
+  const rt = useMarketTicks();
+  const hasWs = Boolean(process.env.NEXT_PUBLIC_XSTREAM_WS_URL?.trim());
+  const indicatorsFromWs =
+    hasWs && rt?.connection === "open" && (rt.hasTradingSnapshotOverWs ?? false);
+
   const { data: analytics, isLoading: analyticsLoading } = useQuery({
     queryKey: ["analytics-summary"],
     queryFn: fetchAnalytics,
@@ -41,8 +47,11 @@ export default function DashboardPage() {
   const { data: indicators } = useQuery({
     queryKey: ["indicators"],
     queryFn: fetchIndicators,
-    refetchInterval: 5000,
+    refetchInterval: indicatorsFromWs ? false : 5000,
+    staleTime: indicatorsFromWs ? 60_000 : 10_000,
   });
+  const mergedIndicators = rt?.applyLiveToIndicators(indicators) ?? indicators;
+  const liveBankNifty = rt?.live?.bankNifty;
 
   const portfolio = analytics?.portfolio;
   const greeks = analytics?.greeks;
@@ -75,7 +84,10 @@ export default function DashboardPage() {
       </div>
 
       {/* Market Header */}
-      <MarketHeader indicators={indicators} bankNifty={market?.bankNifty} />
+      <MarketHeader
+        indicators={mergedIndicators}
+        bankNifty={liveBankNifty ?? market?.bankNifty}
+      />
 
       {/* Portfolio Summary Cards */}
       <div className="mb-6 grid grid-cols-2 gap-4 lg:grid-cols-5">
@@ -112,7 +124,10 @@ export default function DashboardPage() {
       {/* Charts Row */}
       <div className="mb-6 grid gap-6 lg:grid-cols-2">
         <PnLChart data={pnlHistory ?? []} />
-        <PayoffDiagram data={payoff ?? []} spot={market?.spot ?? 22500} />
+        <PayoffDiagram
+          data={payoff ?? []}
+          spot={mergedIndicators?.spot ?? market?.spot ?? 22500}
+        />
       </div>
 
       {/* Greeks Panel */}

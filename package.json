@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "next dev",
     "dev:sim": "cd simulator && node server.js",
+    "dev:ws-gateway": "cd xstream-ws-gateway && npm run dev",
     "dev:full": "concurrently \"npm run dev:sim\" \"npm run dev\"",
     "sim:test": "node simulator/_test_full.js",
     "build": "next build",
