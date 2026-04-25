@@ -24,8 +24,11 @@
  *   G. Buy CE/PE (directional) — only on strong breakout
  */
 
-import { MarketIndicators, OptionChainStrike, OptionsChainResponse } from "@/types/market";
+import { MarketIndicators, OptionChainRow, OptionChainStrike, OptionsChainResponse } from "@/types/market";
 import { TechnicalSnapshot } from "@/server/market-data/technicals";
+import type { ProfessionalIndicatorBundle } from "@/server/market-data/professional-indicators";
+import type { FiiDiiSnapshot, FiiDiiUnavailable } from "@/server/market-data/fii-dii";
+import { buildProTradeSignal, type ProTradeSignal } from "./scan-signal";
 
 // ─── Types ───────────────────────────────────
 
@@ -49,6 +52,8 @@ export interface ScanLeg {
   oi: number;
   changeInOi: number;
   volume: number;
+  /** 5paisa ScripCode for order placement (NSE F&O) */
+  scripCode?: number;
 }
 
 export interface ScanTrade {
@@ -83,11 +88,15 @@ export interface ScanTrade {
 export interface ScanResult {
   bestTrade: ScanTrade | null;
   alternates: ScanTrade[];     // top 3 alternatives
+  /** Top credit (selling) structures by model rank — always populated when chain exists */
+  topCreditStrategies: ScanTrade[];
   marketBias: "BULLISH" | "BEARISH" | "NEUTRAL";
   biasStrength: number;        // 0-100
   scanTimestamp: string;
   marketContext: {
     spot: number;
+    spotChange: number;
+    spotChangePct: number;
     vix: number;
     pcr: number;
     trend: string;
@@ -99,6 +108,9 @@ export interface ScanResult {
     atmStraddle: number;       // ATM CE+PE premium
     expectedMove: number;      // ±points based on straddle
   };
+  professionalIndicators: ProfessionalIndicatorBundle;
+  fiiDii: FiiDiiSnapshot | FiiDiiUnavailable | null;
+  proSignal: ProTradeSignal;
 }
 
 export interface AutoScanInput {
@@ -108,6 +120,8 @@ export interface AutoScanInput {
   spot: number;
   capital: number;             // total capital for 2% target calc
   lotSize: number;
+  proBundle?: ProfessionalIndicatorBundle;
+  fiiDii?: FiiDiiSnapshot | FiiDiiUnavailable | null;
 }
 
 // ─── Constants ───────────────────────────────
@@ -115,6 +129,14 @@ export interface AutoScanInput {
 const NIFTY_STEP = 50;
 const LOT_SIZE = 75;
 const DEFAULT_CAPITAL = 200_000; // ₹2L for 2% = ₹4,000 target
+
+const EMPTY_PRO: ProfessionalIndicatorBundle = {
+  macd: null,
+  bollinger: null,
+  stochastic: null,
+  chain: null,
+  oiInsights: null,
+};
 
 // ─── Main Scanner ────────────────────────────
 
@@ -126,7 +148,7 @@ export function runAutoScan(input: AutoScanInput): ScanResult {
   const strikes = chain.chain;
 
   if (strikes.length === 0) {
-    return emptyScanResult(spot, ind);
+    return emptyScanResult(spot, ind, tech);
   }
 
   // ─── 1. Determine Market Bias ──────────────
@@ -164,15 +186,11 @@ export function runAutoScan(input: AutoScanInput): ScanResult {
     candidates.push(...scanBearCallSpread(strikes, atm, spot, lotSize, ind));
   }
 
-  // E. Short Strangle (neutral)
-  if (bias === "NEUTRAL") {
-    candidates.push(...scanShortStrangle(strikes, atm, spot, lotSize, ind));
-  }
+  // E. Short Strangle — premium sell in all trends (OTM straddle income)
+  candidates.push(...scanShortStrangle(strikes, atm, spot, lotSize, ind));
 
-  // F. Iron Condor (neutral, limited risk)
-  if (bias === "NEUTRAL") {
-    candidates.push(...scanIronCondor(strikes, atm, spot, lotSize, ind));
-  }
+  // F. Iron Condor — defined-risk credit; available in all regimes
+  candidates.push(...scanIronCondor(strikes, atm, spot, lotSize, ind));
 
   // G. Directional Buy (only strong trend)
   if (biasStrength >= 70) {
@@ -184,23 +202,80 @@ export function runAutoScan(input: AutoScanInput): ScanResult {
     enrichTrade(trade, ind, tech, maxCallOI, maxPutOI, target2Pct, capital);
   }
 
-  // ─── 5. Rank by Kelly Score (EV × WinProb) ─
-  candidates.sort((a, b) => b.kellyScore - a.kellyScore);
+  const isNakedShortPremium = (t: ScanTrade) =>
+    t.netCredit > 0 && (t.tradeType === "SELL_PE" || t.tradeType === "SELL_CE");
 
-  // ─── 6. Filter: only +EV trades ────────────
-  const positiveEV = candidates.filter((t) => t.expectedValue > 0 && t.score >= 40);
+  const isDefinedRiskCredit = (t: ScanTrade) =>
+    t.netCredit > 0 &&
+    (t.tradeType === "IRON_CONDOR" ||
+      t.tradeType === "BULL_PUT_SPREAD" ||
+      t.tradeType === "BEAR_CALL_SPREAD" ||
+      t.tradeType === "SHORT_STRANGLE");
 
-  const bestTrade = positiveEV.length > 0 ? positiveEV[0] : null;
-  const alternates = positiveEV.slice(1, 4);
+  const adjustedRank = (t: ScanTrade): number => {
+    if (t.netCredit <= 0) return t.kellyScore;
+    const spreadBonus = isDefinedRiskCredit(t) ? 1.25 : 1.0;
+    let r = t.kellyScore * 1.35 * spreadBonus;
+    if (isNakedShortPremium(t)) r *= 0.22;
+    return r;
+  };
+
+  // ─── 5. Rank: prefer credit (selling) over debit when scores are close ─
+  candidates.sort((a, b) => adjustedRank(b) - adjustedRank(a));
+
+  // ─── 6. Top credit ideas: multi-leg / defined risk first, then single-leg ────
+  const posCredit = candidates.filter((t) => t.netCredit > 0);
+  const multiLeg = posCredit
+    .filter((t) => t.legs.length >= 2)
+    .sort((a, b) => adjustedRank(b) - adjustedRank(a));
+  const singleLeg = posCredit
+    .filter((t) => t.legs.length === 1)
+    .sort((a, b) => adjustedRank(b) - adjustedRank(a));
+  const topCreditStrategies: ScanTrade[] = [
+    ...multiLeg.slice(0, 5),
+    ...singleLeg.slice(0, Math.max(0, 5 - multiLeg.length)),
+  ].slice(0, 5);
+
+  // ─── 7. Best pick: +EV; fall back to best credit if nothing passes strict filter ─
+  const strict = (t: ScanTrade) => t.expectedValue > 0 && t.score >= 40;
+  let positiveEV = candidates.filter(strict);
+  if (positiveEV.length === 0) {
+    positiveEV = candidates.filter(
+      (t) => t.netCredit > 0 && t.expectedValue > 0 && t.score >= 32,
+    );
+  }
+  if (positiveEV.length === 0) {
+    positiveEV = candidates
+      .filter((t) => t.netCredit > 0 && t.score >= 25)
+      .sort((a, b) => adjustedRank(b) - adjustedRank(a))
+      .slice(0, 5);
+  }
+  if (positiveEV.length === 0) {
+    positiveEV = topCreditStrategies.length ? topCreditStrategies.slice(0, 1) : [];
+  }
+
+  const firstHedged = positiveEV.find((t) => t.legs.length >= 2);
+  const bestTrade: ScanTrade | null = firstHedged ?? (positiveEV.length > 0 ? positiveEV[0] : null);
+  const alternates = (bestTrade
+    ? positiveEV.filter((t) => t.id !== bestTrade.id)
+    : positiveEV
+  ).slice(0, 3);
+
+  const pro = input.proBundle ?? EMPTY_PRO;
+  const fii = input.fiiDii ?? null;
+  const proSignal = buildProTradeSignal(bestTrade, ind, tech, spot, pro, fii);
 
   return {
     bestTrade,
     alternates,
+    topCreditStrategies,
     marketBias: bias,
     biasStrength,
     scanTimestamp: new Date().toISOString(),
     marketContext: {
       spot,
+      spotChange: ind.spotChange,
+      spotChangePct: ind.spotChangePct,
       vix: ind.vix,
       pcr: ind.pcr,
       trend: ind.trend,
@@ -212,6 +287,9 @@ export function runAutoScan(input: AutoScanInput): ScanResult {
       atmStraddle: r2(atmStraddle),
       expectedMove,
     },
+    professionalIndicators: pro,
+    fiiDii: fii,
+    proSignal,
   };
 }
 
@@ -256,6 +334,7 @@ function scanSellPE(
         action: "SELL", optionType: "PE", strike, premium: r2(premium),
         iv: row.pe.iv, delta, oi: row.pe.oi,
         changeInOi: row.pe.changeInOi, volume: row.pe.volume,
+        scripCode: scripFromLeg(row.pe),
       }],
       netCredit: r2(premium),
       maxProfit: r2(premium * lotSize),
@@ -307,6 +386,7 @@ function scanSellCE(
         action: "SELL", optionType: "CE", strike, premium: r2(premium),
         iv: row.ce.iv, delta, oi: row.ce.oi,
         changeInOi: row.ce.changeInOi, volume: row.ce.volume,
+        scripCode: scripFromLeg(row.ce),
       }],
       netCredit: r2(premium),
       maxProfit: r2(premium * lotSize),
@@ -323,53 +403,66 @@ function scanSellCE(
   return results;
 }
 
+/** Min net credit (₹/share) to accept; keeps tiny / negative-edge spreads from crowding the list. */
+const MIN_SPREAD_CREDIT = 0.15;
+
 function scanBullPutSpread(
   strikes: OptionChainStrike[], atm: number, spot: number,
   lotSize: number, ind: MarketIndicators,
 ): ScanTrade[] {
   const results: ScanTrade[] = [];
+  const wingWidths = [NIFTY_STEP, NIFTY_STEP * 2, NIFTY_STEP * 3, NIFTY_STEP * 4]; // 50,100,150,200
+
   for (const sellDist of [100, 150, 200]) {
     const sellStrike = atm - sellDist;
-    const buyStrike = sellStrike - NIFTY_STEP * 2; // 100pt wide
     const sell = findStrike(strikes, sellStrike);
-    const buy = findStrike(strikes, buyStrike);
-    if (!sell || !buy) continue;
+    if (!sell) continue;
 
-    const credit = sell.pe.ltp - buy.pe.ltp;
-    if (credit <= 1) continue;
+    for (const width of wingWidths) {
+      const buyStrike = sellStrike - width;
+      if (buyStrike <= 0) continue;
+      const buy = findStrike(strikes, buyStrike);
+      if (!buy) continue;
 
-    const width = sellStrike - buyStrike;
-    const maxProfit = credit * lotSize;
-    const maxLoss = (width - credit) * lotSize;
-    if (maxLoss <= 0) continue;
+      const credit = sell.pe.ltp - buy.pe.ltp;
+      if (credit <= MIN_SPREAD_CREDIT) continue;
 
-    const sellDelta = Math.abs(sell.pe.greeks?.delta ?? 0);
-    const winProb = (1 - sellDelta) * 100;
+      const effWidth = sellStrike - buyStrike;
+      if (effWidth <= 0) continue;
+      const maxProfit = credit * lotSize;
+      const maxLoss = (effWidth - credit) * lotSize;
+      if (maxLoss <= 0) continue;
 
-    results.push({
-      id: genId(),
-      tradeType: "BULL_PUT_SPREAD",
-      direction: "BULLISH",
-      legs: [
-        { action: "SELL", optionType: "PE", strike: sellStrike, premium: r2(sell.pe.ltp),
-          iv: sell.pe.iv, delta: sellDelta, oi: sell.pe.oi,
-          changeInOi: sell.pe.changeInOi, volume: sell.pe.volume },
-        { action: "BUY", optionType: "PE", strike: buyStrike, premium: r2(buy.pe.ltp),
-          iv: buy.pe.iv, delta: Math.abs(buy.pe.greeks?.delta ?? 0), oi: buy.pe.oi,
-          changeInOi: buy.pe.changeInOi, volume: buy.pe.volume },
-      ],
-      netCredit: r2(credit),
-      maxProfit: r2(maxProfit),
-      maxLoss: r2(maxLoss),
-      breakeven: [r2(sellStrike - credit)],
-      marginRequired: r2(maxLoss * 1.1), // limited risk = max loss + buffer
-      winProbability: r2(winProb),
-      expectedValue: 0, riskReward: 0, kellyScore: 0, score: 0,
-      edge: "", rationale: [`Bull Put Spread: Sell ${sellStrike}PE / Buy ${buyStrike}PE for ₹${r2(credit)} credit`],
-      warnings: [], oiWall: "",
-      thetaDecayPerDay: r2(Math.abs(sell.pe.greeks?.theta ?? 0) * lotSize),
-      targetTime: "Expiry day",
-    });
+      const sellDelta = Math.abs(sell.pe.greeks?.delta ?? 0);
+      const winProb = (1 - sellDelta) * 100;
+
+      results.push({
+        id: genId(),
+        tradeType: "BULL_PUT_SPREAD",
+        direction: "BULLISH",
+        legs: [
+          { action: "SELL", optionType: "PE", strike: sellStrike, premium: r2(sell.pe.ltp),
+            iv: sell.pe.iv, delta: sellDelta, oi: sell.pe.oi,
+            changeInOi: sell.pe.changeInOi, volume: sell.pe.volume,
+            scripCode: scripFromLeg(sell.pe) },
+          { action: "BUY", optionType: "PE", strike: buyStrike, premium: r2(buy.pe.ltp),
+            iv: buy.pe.iv, delta: Math.abs(buy.pe.greeks?.delta ?? 0), oi: buy.pe.oi,
+            changeInOi: buy.pe.changeInOi, volume: buy.pe.volume,
+            scripCode: scripFromLeg(buy.pe) },
+        ],
+        netCredit: r2(credit),
+        maxProfit: r2(maxProfit),
+        maxLoss: r2(maxLoss),
+        breakeven: [r2(sellStrike - credit)],
+        marginRequired: r2(maxLoss * 1.1), // limited risk = max loss + buffer
+        winProbability: r2(winProb),
+        expectedValue: 0, riskReward: 0, kellyScore: 0, score: 0,
+        edge: "", rationale: [`Bull Put Spread: Sell ${sellStrike}PE / Buy ${buyStrike}PE for ₹${r2(credit)} credit (wing ${width}pt)`],
+        warnings: [], oiWall: "",
+        thetaDecayPerDay: r2(Math.abs(sell.pe.greeks?.theta ?? 0) * lotSize),
+        targetTime: "Expiry day",
+      });
+    }
   }
   return results;
 }
@@ -379,48 +472,56 @@ function scanBearCallSpread(
   lotSize: number, ind: MarketIndicators,
 ): ScanTrade[] {
   const results: ScanTrade[] = [];
+  const wingWidths = [NIFTY_STEP, NIFTY_STEP * 2, NIFTY_STEP * 3, NIFTY_STEP * 4];
+
   for (const sellDist of [100, 150, 200]) {
     const sellStrike = atm + sellDist;
-    const buyStrike = sellStrike + NIFTY_STEP * 2;
     const sell = findStrike(strikes, sellStrike);
-    const buy = findStrike(strikes, buyStrike);
-    if (!sell || !buy) continue;
+    if (!sell) continue;
 
-    const credit = sell.ce.ltp - buy.ce.ltp;
-    if (credit <= 1) continue;
+    for (const width of wingWidths) {
+      const buyStrike = sellStrike + width;
+      const buy = findStrike(strikes, buyStrike);
+      if (!buy) continue;
 
-    const width = buyStrike - sellStrike;
-    const maxProfit = credit * lotSize;
-    const maxLoss = (width - credit) * lotSize;
-    if (maxLoss <= 0) continue;
+      const credit = sell.ce.ltp - buy.ce.ltp;
+      if (credit <= MIN_SPREAD_CREDIT) continue;
 
-    const sellDelta = Math.abs(sell.ce.greeks?.delta ?? 0);
-    const winProb = (1 - sellDelta) * 100;
+      const widthPts = buyStrike - sellStrike;
+      const maxProfit = credit * lotSize;
+      const maxLoss = (widthPts - credit) * lotSize;
+      if (maxLoss <= 0) continue;
 
-    results.push({
-      id: genId(),
-      tradeType: "BEAR_CALL_SPREAD",
-      direction: "BEARISH",
-      legs: [
-        { action: "SELL", optionType: "CE", strike: sellStrike, premium: r2(sell.ce.ltp),
-          iv: sell.ce.iv, delta: sellDelta, oi: sell.ce.oi,
-          changeInOi: sell.ce.changeInOi, volume: sell.ce.volume },
-        { action: "BUY", optionType: "CE", strike: buyStrike, premium: r2(buy.ce.ltp),
-          iv: buy.ce.iv, delta: Math.abs(buy.ce.greeks?.delta ?? 0), oi: buy.ce.oi,
-          changeInOi: buy.ce.changeInOi, volume: buy.ce.volume },
-      ],
-      netCredit: r2(credit),
-      maxProfit: r2(maxProfit),
-      maxLoss: r2(maxLoss),
-      breakeven: [r2(sellStrike + credit)],
-      marginRequired: r2(maxLoss * 1.1),
-      winProbability: r2(winProb),
-      expectedValue: 0, riskReward: 0, kellyScore: 0, score: 0,
-      edge: "", rationale: [`Bear Call Spread: Sell ${sellStrike}CE / Buy ${buyStrike}CE for ₹${r2(credit)} credit`],
-      warnings: [], oiWall: "",
-      thetaDecayPerDay: r2(Math.abs(sell.ce.greeks?.theta ?? 0) * lotSize),
-      targetTime: "Expiry day",
-    });
+      const sellDelta = Math.abs(sell.ce.greeks?.delta ?? 0);
+      const winProb = (1 - sellDelta) * 100;
+
+      results.push({
+        id: genId(),
+        tradeType: "BEAR_CALL_SPREAD",
+        direction: "BEARISH",
+        legs: [
+          { action: "SELL", optionType: "CE", strike: sellStrike, premium: r2(sell.ce.ltp),
+            iv: sell.ce.iv, delta: sellDelta, oi: sell.ce.oi,
+            changeInOi: sell.ce.changeInOi, volume: sell.ce.volume,
+            scripCode: scripFromLeg(sell.ce) },
+          { action: "BUY", optionType: "CE", strike: buyStrike, premium: r2(buy.ce.ltp),
+            iv: buy.ce.iv, delta: Math.abs(buy.ce.greeks?.delta ?? 0), oi: buy.ce.oi,
+            changeInOi: buy.ce.changeInOi, volume: buy.ce.volume,
+            scripCode: scripFromLeg(buy.ce) },
+        ],
+        netCredit: r2(credit),
+        maxProfit: r2(maxProfit),
+        maxLoss: r2(maxLoss),
+        breakeven: [r2(sellStrike + credit)],
+        marginRequired: r2(maxLoss * 1.1),
+        winProbability: r2(winProb),
+        expectedValue: 0, riskReward: 0, kellyScore: 0, score: 0,
+        edge: "", rationale: [`Bear Call Spread: Sell ${sellStrike}CE / Buy ${buyStrike}CE for ₹${r2(credit)} credit (wing ${width}pt)`],
+        warnings: [], oiWall: "",
+        thetaDecayPerDay: r2(Math.abs(sell.ce.greeks?.theta ?? 0) * lotSize),
+        targetTime: "Expiry day",
+      });
+    }
   }
   return results;
 }
@@ -450,10 +551,12 @@ function scanShortStrangle(
       legs: [
         { action: "SELL", optionType: "CE", strike: callStrike, premium: r2(call.ce.ltp),
           iv: call.ce.iv, delta: callDelta, oi: call.ce.oi,
-          changeInOi: call.ce.changeInOi, volume: call.ce.volume },
+          changeInOi: call.ce.changeInOi, volume: call.ce.volume,
+          scripCode: scripFromLeg(call.ce) },
         { action: "SELL", optionType: "PE", strike: putStrike, premium: r2(put.pe.ltp),
           iv: put.pe.iv, delta: putDelta, oi: put.pe.oi,
-          changeInOi: put.pe.changeInOi, volume: put.pe.volume },
+          changeInOi: put.pe.changeInOi, volume: put.pe.volume,
+          scripCode: scripFromLeg(put.pe) },
       ],
       netCredit: r2(credit),
       maxProfit: r2(credit * lotSize),
@@ -507,16 +610,20 @@ function scanIronCondor(
       legs: [
         { action: "SELL", optionType: "CE", strike: sellCall, premium: r2(sc.ce.ltp),
           iv: sc.ce.iv, delta: callDelta, oi: sc.ce.oi,
-          changeInOi: sc.ce.changeInOi, volume: sc.ce.volume },
+          changeInOi: sc.ce.changeInOi, volume: sc.ce.volume,
+          scripCode: scripFromLeg(sc.ce) },
         { action: "BUY", optionType: "CE", strike: buyCall, premium: r2(bc.ce.ltp),
           iv: bc.ce.iv, delta: Math.abs(bc.ce.greeks?.delta ?? 0), oi: bc.ce.oi,
-          changeInOi: bc.ce.changeInOi, volume: bc.ce.volume },
+          changeInOi: bc.ce.changeInOi, volume: bc.ce.volume,
+          scripCode: scripFromLeg(bc.ce) },
         { action: "SELL", optionType: "PE", strike: sellPut, premium: r2(sp.pe.ltp),
           iv: sp.pe.iv, delta: putDelta, oi: sp.pe.oi,
-          changeInOi: sp.pe.changeInOi, volume: sp.pe.volume },
+          changeInOi: sp.pe.changeInOi, volume: sp.pe.volume,
+          scripCode: scripFromLeg(sp.pe) },
         { action: "BUY", optionType: "PE", strike: buyPut, premium: r2(bp.pe.ltp),
           iv: bp.pe.iv, delta: Math.abs(bp.pe.greeks?.delta ?? 0), oi: bp.pe.oi,
-          changeInOi: bp.pe.changeInOi, volume: bp.pe.volume },
+          changeInOi: bp.pe.changeInOi, volume: bp.pe.volume,
+          scripCode: scripFromLeg(bp.pe) },
       ],
       netCredit: r2(credit),
       maxProfit: r2(maxProfit),
@@ -556,6 +663,7 @@ function scanDirectionalBuy(
           action: "BUY", optionType: "CE", strike, premium: r2(premium),
           iv: row.ce.iv, delta, oi: row.ce.oi,
           changeInOi: row.ce.changeInOi, volume: row.ce.volume,
+          scripCode: scripFromLeg(row.ce),
         }],
         netCredit: r2(-premium),
         maxProfit: r2(premium * 2 * lotSize), // 2x target for directional
@@ -588,6 +696,7 @@ function scanDirectionalBuy(
           action: "BUY", optionType: "PE", strike, premium: r2(premium),
           iv: row.pe.iv, delta, oi: row.pe.oi,
           changeInOi: row.pe.changeInOi, volume: row.pe.volume,
+          scripCode: scripFromLeg(row.pe),
         }],
         netCredit: r2(-premium),
         maxProfit: r2(premium * 2 * lotSize),
@@ -739,42 +848,101 @@ function determineBias(
   let bullPoints = 0;
   let bearPoints = 0;
 
-  // Technicals
-  if (tech.emaCrossover === "BULLISH") bullPoints += 15;
-  else if (tech.emaCrossover === "BEARISH") bearPoints += 15;
+  // ── Price trend (VWAP/SMA) — same as "Trend" pill; heavy weight so bias matches chart
+  if (ind.trend === "trend-up") {
+    bullPoints += 24;
+  } else if (ind.trend === "trend-down") {
+    bearPoints += 24;
+  } else {
+    bullPoints += 5;
+    bearPoints += 5;
+  }
+  if (ind.trend === "trend-up" && ind.trendStrength > 50) {
+    bullPoints += Math.round((ind.trendStrength - 50) * 0.25);
+  }
+  if (ind.trend === "trend-down" && ind.trendStrength > 50) {
+    bearPoints += Math.round((ind.trendStrength - 50) * 0.25);
+  }
 
-  if (tech.superTrendSignal === "BUY") bullPoints += 15;
-  else bearPoints += 15;
+  // ── Session: spot vs previous close (bear days no longer get overridden by ST alone)
+  const d = ind.spotChangePct;
+  if (d < -0.2) {
+    bearPoints += 22;
+  } else if (d < -0.05) {
+    bearPoints += 12;
+  } else if (d > 0.2) {
+    bullPoints += 22;
+  } else if (d > 0.05) {
+    bullPoints += 12;
+  }
 
-  if (tech.priceVsVwap === "ABOVE") bullPoints += 10;
-  else if (tech.priceVsVwap === "BELOW") bearPoints += 10;
+  // When the chart trend is down, do not let a single short-term signal flip the desk to "bull" easily
+  const trendDown = ind.trend === "trend-down";
+  const trendUp = ind.trend === "trend-up";
+  const stBull = tech.superTrendSignal === "BUY";
+  const stBear = !stBull;
+  if (trendDown && stBull) {
+    bullPoints += 4;
+  } else if (trendUp && stBear) {
+    bearPoints += 4;
+  } else {
+    if (stBull) bullPoints += 12;
+    else bearPoints += 12;
+  }
 
-  if (tech.rsi > 60) bullPoints += 8;
-  else if (tech.rsi < 40) bearPoints += 8;
+  if (trendDown && tech.emaCrossover === "BULLISH") {
+    bullPoints += 5;
+  } else if (trendUp && tech.emaCrossover === "BEARISH") {
+    bearPoints += 5;
+  } else {
+    if (tech.emaCrossover === "BULLISH") bullPoints += 12;
+    else if (tech.emaCrossover === "BEARISH") bearPoints += 12;
+  }
 
-  if (tech.momentum > 0.3) bullPoints += 7;
-  else if (tech.momentum < -0.3) bearPoints += 7;
+  if (trendDown && tech.priceVsVwap === "ABOVE") {
+    bullPoints += 4; // dead-cat: above VWAP but structurally down
+  } else if (trendUp && tech.priceVsVwap === "BELOW") {
+    bearPoints += 4;
+  } else {
+    if (tech.priceVsVwap === "ABOVE") bullPoints += 8;
+    else if (tech.priceVsVwap === "BELOW") bearPoints += 8;
+  }
 
-  // Indicators
-  if (ind.trend === "trend-up") bullPoints += 15;
-  else if (ind.trend === "trend-down") bearPoints += 15;
+  if (tech.rsi > 60) bullPoints += 6;
+  else if (tech.rsi < 40) bearPoints += 6;
 
-  if (ind.pcr > 1.1) bullPoints += 5; // high put writing = support
-  else if (ind.pcr < 0.8) bearPoints += 5;
+  if (tech.momentum > 0.3) bullPoints += 5;
+  else if (tech.momentum < -0.3) bearPoints += 5;
 
-  const total = bullPoints + bearPoints || 1;
+  if (ind.pcr > 1.1) bullPoints += 4;
+  else if (ind.pcr < 0.8) bearPoints += 4;
+
+  const total = Math.max(1, bullPoints + bearPoints);
   const bullPct = (bullPoints / total) * 100;
   const bearPct = (bearPoints / total) * 100;
   const diff = Math.abs(bullPct - bearPct);
 
-  if (diff < 15) return { bias: "NEUTRAL", biasStrength: Math.round(50 - diff) };
-  if (bullPct > bearPct) return { bias: "BULLISH", biasStrength: Math.round(bullPct) };
-  return { bias: "BEARISH", biasStrength: Math.round(bearPct) };
+  if (diff < 10) {
+    return { bias: "NEUTRAL", biasStrength: Math.round(50) };
+  }
+  if (bullPoints > bearPoints) {
+    return { bias: "BULLISH", biasStrength: Math.round(bullPct) };
+  }
+  if (bearPoints > bullPoints) {
+    return { bias: "BEARISH", biasStrength: Math.round(bearPct) };
+  }
+  return { bias: "NEUTRAL", biasStrength: 50 };
 }
 
 // ══════════════════════════════════════════════
 //  Helpers
 // ══════════════════════════════════════════════
+
+function scripFromLeg(row: OptionChainRow | undefined): number | undefined {
+  if (!row?.scripCode) return undefined;
+  const n = parseInt(String(row.scripCode).replace(/[^\d]/g, ""), 10);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
 
 function findStrike(chain: OptionChainStrike[], strike: number): OptionChainStrike | undefined {
   return chain.find((s) => s.strike === strike);
@@ -803,19 +971,35 @@ function estimateMargin(spot: number, premium: number, type: string, lotSize: nu
   return r2(premium * lotSize); // buy = premium paid
 }
 
-function emptyScanResult(spot: number, ind: MarketIndicators): ScanResult {
+function emptyScanResult(spot: number, ind: MarketIndicators, tech: TechnicalSnapshot): ScanResult {
+  const pro = EMPTY_PRO;
+  const fii = null;
+  const proSignal = buildProTradeSignal(null, ind, tech, spot, pro, fii);
   return {
     bestTrade: null,
     alternates: [],
+    topCreditStrategies: [],
     marketBias: "NEUTRAL",
     biasStrength: 0,
     scanTimestamp: new Date().toISOString(),
     marketContext: {
-      spot, vix: ind.vix, pcr: ind.pcr, trend: ind.trend,
-      trendStrength: ind.trendStrength, ivPercentile: ind.ivPercentile,
-      maxCallOI: { strike: 0, oi: 0 }, maxPutOI: { strike: 0, oi: 0 },
-      atmIV: 0, atmStraddle: 0, expectedMove: 0,
+      spot,
+      spotChange: ind.spotChange,
+      spotChangePct: ind.spotChangePct,
+      vix: ind.vix,
+      pcr: ind.pcr,
+      trend: ind.trend,
+      trendStrength: ind.trendStrength,
+      ivPercentile: ind.ivPercentile,
+      maxCallOI: { strike: 0, oi: 0 },
+      maxPutOI: { strike: 0, oi: 0 },
+      atmIV: 0,
+      atmStraddle: 0,
+      expectedMove: 0,
     },
+    professionalIndicators: pro,
+    fiiDii: fii,
+    proSignal,
   };
 }
 

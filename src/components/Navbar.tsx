@@ -8,7 +8,7 @@ const NAV_ITEMS = [
   { href: "/dashboard", label: "🏠 Dashboard" },
   { href: "/positions", label: "📊 Positions" },
   { href: "/option-chain-live", label: "📡 Option Chain" },
-  { href: "/auto-scanner", label: "🔍 Scanner" },
+  { href: "/auto-scanner", label: "📊 Pro Desk" },
   { href: "/trade-suggestions", label: "🎯 Trades" },
   { href: "/backtest", label: "🔬 Backtest" },
 ];

@@ -10,6 +10,8 @@ import { classifyTrend } from "@/server/market-data/trend";
 import { calculateSupportResistance } from "@/server/market-data/support-resistance";
 import { computeIVPercentile } from "@/server/market-data/analytics";
 import { computeTechnicals } from "@/server/market-data/technicals";
+import { buildProfessionalBundle } from "@/server/market-data/professional-indicators";
+import { fetchFiiDiiNseTable } from "@/server/market-data/fii-dii";
 import { runAutoScan } from "@/server/engine/auto-scanner";
 import type { MarketIndicators } from "@/types/market";
 
@@ -18,9 +20,8 @@ const USE_SIMULATOR = process.env.USE_SIMULATOR === "true";
 /**
  * GET /api/v1/strategy/auto-scan
  *
- * Continuously scans the NIFTY 50 options chain and returns the single
- * best intraday trade targeting ~2% daily return, with win probability,
- * expected value, and full trade reasoning.
+ * Pro options desk: chain scan prioritizing credit/hedge structures, pro indicators,
+ * FII/DII (NSE when reachable), and ACTIVE/STANDBY/AVOID signal vs technical stack.
  *
  * Query params:
  *   capital — user's total capital (default 200000)
@@ -95,16 +96,25 @@ export async function GET(request: NextRequest) {
         expiry,
       };
 
-      // ─── 3. Options Chain (pre-fetched spot) ─
-      const chainResponse = await fetchOptionsChain(
-        session.accessToken,
-        "NIFTY",
-        expiry,
-        session.clientCode,
-        { nifty: spot, bankNifty: 0, vix },
-      );
+      // ─── 3. Options Chain + pro bundle + FII/DII (parallel where possible) ─
+      const [chainResponse, fiiDii] = await Promise.all([
+        fetchOptionsChain(
+          session.accessToken,
+          "NIFTY",
+          expiry,
+          session.clientCode,
+          { nifty: spot, bankNifty: 0, vix },
+        ),
+        fetchFiiDiiNseTable(),
+      ]);
 
       indicators.pcr = chainResponse.pcr || 0;
+
+      const proBundle = buildProfessionalBundle(
+        bars,
+        chainResponse.chain,
+        chainResponse.atmStrike,
+      );
 
       // ─── 4. Run Auto-Scanner ───────────────
       const result = runAutoScan({
@@ -114,6 +124,8 @@ export async function GET(request: NextRequest) {
         spot,
         capital,
         lotSize: 75,
+        proBundle,
+        fiiDii,
       });
 
       return NextResponse.json(result);

@@ -1,19 +1,12 @@
 "use client";
 
 /**
- * Auto-Scanner Dashboard — Intraday NIFTY Options Trade Finder
- *
- * Continuously monitors the options chain and displays:
- *   - The SINGLE BEST trade with win probability, EV, legs
- *   - Market bias meter (BULLISH / BEARISH / NEUTRAL)
- *   - OI walls, expected move, ATM straddle
- *   - 3 alternate trade suggestions
- *   - Trade history log
- *
- * Auto-refreshes every 8 seconds (configurable).
+ * Pro Options Desk — NIFTY chain scan with seller-hedge structures, long legs for
+ * defined risk, continuous refresh, and alignment vs technical + pro indicators.
+ * Includes FII/DII (NSE) when the session feed is reachable.
  */
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 
@@ -29,6 +22,7 @@ interface ScanLeg {
   oi: number;
   changeInOi: number;
   volume: number;
+  scripCode?: number;
 }
 
 interface ScanTrade {
@@ -54,14 +48,78 @@ interface ScanTrade {
   targetTime: string;
 }
 
+type ProStatus = "ACTIVE" | "STANDBY" | "AVOID" | "NO_TRADE";
+
+interface ProSignal {
+  status: ProStatus;
+  alignmentPct: number;
+  label: string;
+  entryChecks: { id: string; label: string; passed: boolean; detail: string; critical: boolean }[];
+  exitGuidance: { id: string; label: string; passed: boolean; detail: string; critical: boolean }[];
+  playbook: {
+    structure: string;
+    incomeSummary: string;
+    hedgeOrLongSummary: string;
+    executionNote: string;
+  };
+}
+
+interface OiLegRow {
+  strike: number;
+  oi: number;
+  changeInOi: number;
+  volume: number;
+}
+
+interface OiInsights {
+  topCallByOi: OiLegRow[];
+  topPutByOi: OiLegRow[];
+  topCallByOiChange: OiLegRow[];
+  topPutByOiChange: OiLegRow[];
+  netCallOiChange: number;
+  netPutOiChange: number;
+  callFlow: string;
+  putFlow: string;
+  narrative: string;
+}
+
+interface ProIndicators {
+  macd: { macd: number; signal: number; histogram: number; bias: string } | null;
+  bollinger: { upper: number; middle: number; lower: number; percentB: number; widthPct: number; position: string } | null;
+  stochastic: { k: number; d: number; zone: string } | null;
+  chain: {
+    maxPain: number;
+    totalCallOI: number;
+    totalPutOI: number;
+    totalCallVol: number;
+    totalPutVol: number;
+    pcrOI: number;
+    pcrVolume: number;
+    ivSkewATM: number;
+  } | null;
+  oiInsights: OiInsights | null;
+}
+
+interface FiiDiiOut {
+  dataAvailable: boolean;
+  asOf?: string;
+  message?: string;
+  servedFromCache?: boolean;
+  cacheNote?: string;
+  rows?: { category: string; buyValue: number; sellValue: number; netValue: number }[];
+}
+
 interface ScanResult {
   bestTrade: ScanTrade | null;
   alternates: ScanTrade[];
+  topCreditStrategies?: ScanTrade[];
   marketBias: "BULLISH" | "BEARISH" | "NEUTRAL";
   biasStrength: number;
   scanTimestamp: string;
   marketContext: {
     spot: number;
+    spotChange?: number;
+    spotChangePct?: number;
     vix: number;
     pcr: number;
     trend: string;
@@ -73,6 +131,9 @@ interface ScanResult {
     atmStraddle: number;
     expectedMove: number;
   };
+  professionalIndicators?: ProIndicators;
+  fiiDii?: FiiDiiOut | null;
+  proSignal?: ProSignal;
   error?: string;
 }
 
@@ -87,6 +148,8 @@ interface HistoryEntry {
 }
 
 // ─── Constants ──────────────────────────────
+
+const NIFTY_OPTION_LOT = 75;
 
 const REFRESH_OPTIONS = [
   { label: "5s", value: 5000 },
@@ -112,6 +175,51 @@ const TRADE_TYPE_LABELS: Record<string, { label: string; icon: string; color: st
   BUY_CE: { label: "Buy Call", icon: "🚀", color: "text-emerald-400" },
   BUY_PE: { label: "Buy Put", icon: "💥", color: "text-rose-400" },
 };
+
+/** User-facing strategy bucket (credit / debit / neutral) */
+const STRATEGY_FAMILY: Record<string, { bucket: string; description: string }> = {
+  BULL_PUT_SPREAD: { bucket: "Credit spread", description: "Put credit spread (bullish)" },
+  BEAR_CALL_SPREAD: { bucket: "Credit spread", description: "Call credit spread (bearish)" },
+  IRON_CONDOR: { bucket: "Neutral — credit", description: "Iron condor" },
+  SHORT_STRANGLE: { bucket: "Neutral — credit", description: "Short strangle" },
+  SELL_PE: { bucket: "Short premium", description: "Sell put (naked / CSP style)" },
+  SELL_CE: { bucket: "Short premium", description: "Sell call (naked)" },
+  BUY_CE: { bucket: "Debit (long)", description: "Long call" },
+  BUY_PE: { bucket: "Debit (long)", description: "Long put" },
+};
+
+function formatChartTrend(t: string): string {
+  if (t === "trend-up") return "Uptrend";
+  if (t === "trend-down") return "Downtrend";
+  return "Sideways / range";
+}
+
+function getBiasNote(
+  marketBias: string,
+  trend: string,
+  spotChangePct: number,
+): string | null {
+  if (trend === "trend-down" && marketBias === "BULLISH") {
+    return "Chart is in a downtrend but the desk still tilts bullish on some inputs. Prefer smaller size and defined-risk credit.";
+  }
+  if (trend === "trend-up" && marketBias === "BEARISH") {
+    return "Chart is in an uptrend but the desk tilts bearish on some inputs. Be careful shorting into strength.";
+  }
+  if (spotChangePct < -0.2 && marketBias === "BULLISH") {
+    return "Spot is down today while bias is bullish — session is weak; any long-delta idea is more fragile.";
+  }
+  return null;
+}
+
+function StrategyFamilyRow({ tradeType }: { tradeType: string }) {
+  const m = STRATEGY_FAMILY[tradeType] ?? { bucket: "Options", description: tradeType };
+  return (
+    <div className="mb-2 flex flex-wrap items-center gap-2">
+      <span className="rounded-md bg-slate-800 px-2 py-0.5 text-[11px] font-semibold text-slate-200">{m.bucket}</span>
+      <span className="text-[11px] text-slate-500">{m.description}</span>
+    </div>
+  );
+}
 
 // ─── Component ──────────────────────────────
 
@@ -152,107 +260,165 @@ export default function AutoScannerPage() {
 
   const ctx = data?.marketContext;
   const best = data?.bestTrade;
+  const biasNote =
+    data && ctx
+      ? getBiasNote(data.marketBias, ctx.trend, ctx.spotChangePct ?? 0)
+      : null;
 
   return (
-    <div className="mx-auto max-w-7xl p-4 sm:p-6">
-      {/* ─── Header ──────────────────────────── */}
-      <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">
-            🔍 Auto-Scanner
-            {isFetching && <span className="ml-2 inline-block h-2 w-2 animate-pulse rounded-full bg-green-400" />}
-          </h1>
-          <p className="mt-1 text-sm text-gray-400">
-            Continuously scanning NIFTY 50 chain for the <span className="font-semibold text-yellow-400">best 2% daily trade</span>
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          {/* Capital input */}
-          <label className="text-xs text-gray-500">
-            Capital ₹
-            <input
-              type="number"
-              value={capital}
-              onChange={(e) => setCapital(Number(e.target.value) || 200000)}
-              className="ml-1 w-24 rounded bg-gray-800 px-2 py-1 text-sm text-white"
-              step={50000}
-              min={50000}
-            />
-          </label>
-          {/* Refresh interval */}
-          <div className="flex gap-1">
-            {REFRESH_OPTIONS.map((opt) => (
-              <button
-                key={opt.value}
-                onClick={() => setRefreshInterval(opt.value)}
-                className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
-                  refreshInterval === opt.value
-                    ? "bg-yellow-600 text-white"
-                    : "bg-gray-800 text-gray-400 hover:bg-gray-700"
-                }`}
-              >
-                {opt.label}
-              </button>
-            ))}
+    <div className="mx-auto min-h-screen max-w-6xl p-4 pb-16 sm:p-8">
+      {/* Header */}
+      <header className="mb-8 border-b border-slate-800/80 pb-8">
+        <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500">NIFTY F&amp;O</p>
+            <h1 className="mt-1 flex items-center gap-2 text-3xl font-bold tracking-tight text-white">
+              Strategy scanner
+              {isFetching && (
+                <span className="inline-block h-2.5 w-2.5 animate-pulse rounded-full bg-emerald-500" title="Updating" />
+              )}
+            </h1>
+            <p className="mt-2 max-w-lg text-sm leading-relaxed text-slate-400">
+              Spreads, strangles, condors, and long options — grouped as <span className="text-slate-200">credit</span>,{" "}
+              <span className="text-slate-200">debit</span>, or <span className="text-slate-200">short premium</span>. Bias
+              now weights <span className="text-slate-200">index trend</span> and <span className="text-slate-200">today’s
+              spot change</span> so it matches bear markets better.
+            </p>
           </div>
-          <span className="text-xs text-gray-600">Scans: {scanCount}</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-xs text-slate-400">
+              Capital
+              <input
+                type="number"
+                value={capital}
+                onChange={(e) => setCapital(Number(e.target.value) || 200000)}
+                className="w-24 rounded border border-slate-600 bg-slate-800 px-2 py-0.5 text-right text-sm text-white"
+                step={50000}
+                min={50000}
+              />
+            </label>
+            <div className="flex rounded-lg border border-slate-700 p-0.5">
+              {REFRESH_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => setRefreshInterval(opt.value)}
+                  className={`rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                    refreshInterval === opt.value
+                      ? "bg-violet-600 text-white"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <span className="text-xs text-slate-600">Refresh #{scanCount}</span>
+          </div>
         </div>
-      </div>
+      </header>
 
-      {/* ─── Market Context Bar ──────────────── */}
-      {ctx && (
-        <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
-          <CtxPill label="NIFTY" value={ctx.spot.toFixed(0)} />
-          <CtxPill label="VIX" value={ctx.vix.toFixed(1)} />
-          <CtxPill label="PCR" value={ctx.pcr.toFixed(2)} />
-          <CtxPill label="Trend" value={ctx.trend.replace("trend-", "").replace("range-bound", "sideways")} />
-          <CtxPill label="IV Pctl" value={`${ctx.ivPercentile}%`} />
-          <CtxPill label="ATM Straddle" value={`₹${ctx.atmStraddle}`} />
-          <CtxPill label="Exp. Move" value={`±${ctx.expectedMove} pts`} />
-          <CtxPill label="ATM IV" value={`${ctx.atmIV.toFixed(1)}%`} />
-        </div>
+      {/* At-a-glance: index vs desk (fixes confusion: trend + spot now drive bias) */}
+      {ctx && data && (
+        <section className="mb-6 grid gap-4 md:grid-cols-3" aria-label="Market snapshot">
+          <div className="rounded-2xl border border-slate-700/80 bg-gradient-to-b from-slate-900/80 to-slate-950 p-5 shadow-sm">
+            <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">NIFTY spot</h2>
+            <p className="mt-2 text-4xl font-bold tabular-nums text-white">{ctx.spot.toFixed(0)}</p>
+            <p
+              className={`mt-1 text-sm font-medium tabular-nums ${
+                (ctx.spotChangePct ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"
+              }`}
+            >
+              {(ctx.spotChangePct ?? 0) >= 0 ? "+" : ""}
+              {(ctx.spotChangePct ?? 0).toFixed(2)}% session
+            </p>
+            <p className="mt-4 text-sm text-slate-300">
+              <span className="text-slate-500">Chart (daily):</span>{" "}
+              <span className="font-semibold text-white">{formatChartTrend(ctx.trend)}</span>
+              <span className="text-slate-500"> · strength {ctx.trendStrength}</span>
+            </p>
+          </div>
+          <div
+            className={`rounded-2xl border-2 p-5 shadow-sm ${
+              BIAS_COLORS[data.marketBias].bg
+            } ${BIAS_COLORS[data.marketBias].border}`}
+          >
+            <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-400">Desk idea bias</h2>
+            <p className={`mt-2 text-3xl font-bold ${BIAS_COLORS[data.marketBias].text}`}>{data.marketBias}</p>
+            <p className="mt-1 text-sm text-slate-400">How strongly ideas lean this way: {data.biasStrength}%</p>
+            <p className="mt-3 text-xs leading-relaxed text-slate-500">
+              Built from: trend, today’s % move, EMA, SuperTrend, VWAP, RSI, PCR. Same “trend” as the left card is
+              weighted heavily so bear days don’t show “bull” unless data supports it.
+            </p>
+            {biasNote && (
+              <p className="mt-3 rounded-lg border border-amber-800/50 bg-amber-950/30 p-2 text-xs text-amber-100/90">
+                {biasNote}
+              </p>
+            )}
+            <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-black/20">
+              <div
+                className={`h-full rounded-full transition-all ${
+                  data.marketBias === "BULLISH"
+                    ? "bg-emerald-500"
+                    : data.marketBias === "BEARISH"
+                      ? "bg-rose-500"
+                      : "bg-sky-500"
+                }`}
+                style={{ width: `${Math.max(8, data.biasStrength)}%` }}
+              />
+            </div>
+          </div>
+          <div className="rounded-2xl border border-slate-700/80 bg-slate-900/50 p-5">
+            <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Vol &amp; OI context</h2>
+            <dl className="mt-3 space-y-2 text-sm">
+              <div className="flex justify-between gap-2">
+                <dt className="text-slate-500">VIX</dt>
+                <dd className="font-mono text-slate-200">{ctx.vix.toFixed(1)}</dd>
+              </div>
+              <div className="flex justify-between gap-2">
+                <dt className="text-slate-500">PCR</dt>
+                <dd className="font-mono text-slate-200">{ctx.pcr.toFixed(2)}</dd>
+              </div>
+              <div className="flex justify-between gap-2">
+                <dt className="text-slate-500">ATM straddle</dt>
+                <dd className="font-mono text-slate-200">₹{ctx.atmStraddle}</dd>
+              </div>
+              <div className="flex justify-between gap-2">
+                <dt className="text-slate-500">1σ move (est.)</dt>
+                <dd className="font-mono text-slate-200">±{ctx.expectedMove} pts</dd>
+              </div>
+              <div className="flex justify-between gap-2 border-t border-slate-800 pt-2">
+                <dt className="text-slate-500">Max OI (PE / CE)</dt>
+                <dd className="text-right text-[11px] text-slate-400">
+                  {ctx.maxPutOI.strike} / {ctx.maxCallOI.strike}
+                </dd>
+              </div>
+            </dl>
+          </div>
+        </section>
       )}
 
-      {/* ─── Market Bias Meter ───────────────── */}
-      {data && (
-        <div className={`mb-6 rounded-lg border p-4 ${BIAS_COLORS[data.marketBias].bg} ${BIAS_COLORS[data.marketBias].border}`}>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <span className="text-3xl">{BIAS_COLORS[data.marketBias].icon}</span>
-              <div>
-                <div className={`text-xl font-bold ${BIAS_COLORS[data.marketBias].text}`}>
-                  Market Bias: {data.marketBias}
-                </div>
-                <div className="text-sm text-gray-400">
-                  Strength: {data.biasStrength}% — based on EMA, SuperTrend, VWAP, RSI, PCR, Trend
-                </div>
-              </div>
-            </div>
-            {/* OI Walls */}
-            {ctx && (
-              <div className="hidden text-right text-xs text-gray-400 sm:block">
-                <div>🟢 Max PE OI: {ctx.maxPutOI.strike} ({formatLakh(ctx.maxPutOI.oi)})</div>
-                <div>🔴 Max CE OI: {ctx.maxCallOI.strike} ({formatLakh(ctx.maxCallOI.oi)})</div>
-                <div className="mt-1 text-gray-500">
-                  Range: {ctx.maxPutOI.strike} — {ctx.maxCallOI.strike} ({ctx.maxCallOI.strike - ctx.maxPutOI.strike} pts)
-                </div>
-              </div>
+      {data?.proSignal && <ProSignalBanner signal={data.proSignal} />}
+
+      {/* Advanced: institutions + indicators — collapsible */}
+      {(data?.fiiDii || data?.professionalIndicators) && (
+        <details className="group mb-6 rounded-2xl border border-slate-800 bg-slate-950/40 [&_summary::-webkit-details-marker]:hidden">
+          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium text-slate-300 transition hover:bg-slate-800/50">
+            <span className="inline-block text-slate-500 transition group-open:rotate-90">▶</span>
+            <span className="text-slate-400">Advanced: FII / DII, MACD, Bollinger, stochastic, OI build-up</span>
+          </summary>
+          <div className="border-t border-slate-800/80 p-4 pt-2">
+            {data.fiiDii && <FiiDiiPanel fii={data.fiiDii} />}
+            {data.professionalIndicators && (
+              <>
+                <ProIndicatorsPanel spot={ctx?.spot ?? 0} ind={data.professionalIndicators} />
+                {data.professionalIndicators.oiInsights && (
+                  <OiBuildupPanel oi={data.professionalIndicators.oiInsights} />
+                )}
+              </>
             )}
           </div>
-          {/* Bias bar */}
-          <div className="mt-3 h-2 overflow-hidden rounded-full bg-gray-700">
-            <div
-              className={`h-full transition-all duration-500 ${
-                data.marketBias === "BULLISH"
-                  ? "bg-emerald-500"
-                  : data.marketBias === "BEARISH"
-                  ? "bg-rose-500"
-                  : "bg-blue-500"
-              }`}
-              style={{ width: `${Math.max(10, data.biasStrength)}%` }}
-            />
-          </div>
-        </div>
+        </details>
       )}
 
       {/* ─── Loading State ───────────────────── */}
@@ -260,7 +426,7 @@ export default function AutoScannerPage() {
         <div className="flex items-center justify-center py-20">
           <div className="text-center">
             <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-yellow-500 border-t-transparent" />
-            <p className="text-gray-400">Scanning {">"}200 strikes across 8 strategies...</p>
+            <p className="text-gray-400">Scanning NIFTY chain, credit spreads, strangles &amp; condors…</p>
           </div>
         </div>
       )}
@@ -283,16 +449,82 @@ export default function AutoScannerPage() {
         </div>
       )}
 
+      {/* ─── Playbook + entry/exit (same structure as server) ─ */}
+      {data?.proSignal?.playbook && (
+        <div className="mb-6 grid gap-4 lg:grid-cols-2">
+          <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+            <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-400">Structure &amp; legs</h3>
+            <p className="text-sm text-slate-300">{data.proSignal.playbook.structure}</p>
+            {best && (
+            <div className="mt-3 space-y-2 text-xs">
+              <div>
+                <span className="text-rose-400/90">Short / credit: </span>
+                <span className="font-mono text-slate-200">{data.proSignal.playbook.incomeSummary}</span>
+              </div>
+              <div>
+                <span className="text-emerald-400/90">Long / hedge: </span>
+                <span className="font-mono text-slate-200">{data.proSignal.playbook.hedgeOrLongSummary}</span>
+              </div>
+              <p className="text-slate-500">{data.proSignal.playbook.executionNote}</p>
+            </div>
+            )}
+          </div>
+          <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+            <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-400">Entry alignment</h3>
+            <ul className="max-h-56 space-y-1.5 overflow-y-auto text-xs">
+              {data.proSignal.entryChecks.map((c) => (
+                <li key={c.id} className="flex gap-2">
+                  <span className={c.passed ? "text-emerald-400" : "text-rose-400"}>{c.passed ? "✓" : "✗"}</span>
+                  <span>
+                    <span className="font-medium text-slate-300">{c.label}</span>
+                    {c.critical && <span className="ml-1 text-amber-500">●</span>}
+                    <span className="block text-slate-500">{c.detail}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+          <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4 lg:col-span-2">
+            <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-400">When to cut / scale (exit framework)</h3>
+            <ul className="grid gap-2 sm:grid-cols-2">
+              {data.proSignal.exitGuidance.map((c) => (
+                <li key={c.id} className="flex gap-2 text-xs text-slate-400">
+                  <span className="text-cyan-500">→</span>
+                  <span><span className="font-medium text-slate-300">{c.label}:</span> {c.detail}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
+
+      {/* ─── Top credit (selling) ideas — always from chain when available ─ */}
+      {data?.topCreditStrategies && data.topCreditStrategies.length > 0 && (
+        <div className="mb-8">
+          <h2 className="text-lg font-semibold text-white">Credit &amp; short-premium ideas</h2>
+          <p className="mb-1 text-sm text-slate-400">Credit spreads, short strangle, iron condor — you receive net premium (subject to margin &amp; risk).</p>
+          <p className="mb-4 text-xs text-slate-600">
+            “Enter in broker” needs ScripCode on every leg. If missing, refresh data or place legs manually in 5paisa.
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {data.topCreditStrategies.map((t) => (
+              <CreditStrategyCard key={t.id} trade={t} lotQty={NIFTY_OPTION_LOT} />
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* ─── Best Trade Card ─────────────────── */}
-      {best && <BestTradeCard trade={best} capital={capital} />}
+      {best && <BestTradeCard trade={best} capital={capital} lotQty={NIFTY_OPTION_LOT} />}
 
       {/* ─── Alternates ──────────────────────── */}
       {data?.alternates && data.alternates.length > 0 && (
         <div className="mt-6">
-          <h2 className="mb-3 text-lg font-semibold text-gray-300">📋 Alternative Trades</h2>
+          <h2 className="mb-1 text-lg font-semibold text-slate-200">Other ranked ideas</h2>
+          <p className="mb-3 text-xs text-slate-500">Same scan; runner-up structures.</p>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {data.alternates.map((trade) => (
-              <AlternateCard key={trade.id} trade={trade} />
+              <AlternateCard key={trade.id} trade={trade} lotQty={NIFTY_OPTION_LOT} />
             ))}
           </div>
         </div>
@@ -350,18 +582,21 @@ export default function AutoScannerPage() {
 
 // ─── Best Trade Card ────────────────────────
 
-function BestTradeCard({ trade, capital }: { trade: ScanTrade; capital: number }) {
+function BestTradeCard({ trade, capital, lotQty }: { trade: ScanTrade; capital: number; lotQty: number }) {
   const tt = TRADE_TYPE_LABELS[trade.tradeType] || { icon: "?", label: trade.tradeType, color: "text-gray-400" };
   const evPositive = trade.expectedValue >= 0;
   const target2Pct = capital * 0.02;
   const hitsTarget = trade.maxProfit >= target2Pct;
+  const isCredit = trade.netCredit > 0;
 
   return (
-    <div className="rounded-xl border-2 border-yellow-600 bg-gradient-to-br from-gray-900 to-gray-800 p-5 shadow-lg shadow-yellow-600/10">
+    <div className="rounded-2xl border-2 border-violet-500/40 bg-gradient-to-br from-slate-900 via-slate-900 to-violet-950/30 p-6 shadow-lg shadow-violet-900/20">
+      <StrategyFamilyRow tradeType={trade.tradeType} />
       {/* Header */}
-      <div className="mb-4 flex items-start justify-between">
+      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <div className="flex items-center gap-2">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Top pick</p>
+          <div className="mt-1 flex flex-wrap items-center gap-2">
             <span className="text-2xl">{tt.icon}</span>
             <h2 className={`text-xl font-bold ${tt.color}`}>{tt.label}</h2>
             <span className={`rounded px-2 py-0.5 text-xs font-semibold ${
@@ -369,14 +604,23 @@ function BestTradeCard({ trade, capital }: { trade: ScanTrade; capital: number }
               trade.direction === "BEARISH" ? "bg-rose-900/50 text-rose-400" :
               "bg-blue-900/50 text-blue-400"
             }`}>
-              {trade.direction}
+              {trade.direction} structure
             </span>
           </div>
-          <p className="mt-1 text-sm text-yellow-400">{trade.edge}</p>
+          <p className="mt-0.5 text-[10px] text-slate-500">Structure bias (e.g. bull put = bullish structure) — not the same as index “desk bias” above.</p>
+          <p className="mt-1 text-sm text-violet-200/90">{trade.edge}</p>
         </div>
-        <div className="text-right">
-          <div className="text-3xl font-bold text-yellow-400">{trade.score}</div>
-          <div className="text-xs text-gray-500">score</div>
+        <div className="flex flex-col items-stretch gap-2 sm:items-end">
+          <div className="text-right">
+            <div className="text-3xl font-bold text-yellow-400">{trade.score}</div>
+            <div className="text-xs text-gray-500">score</div>
+          </div>
+          {isCredit && (
+            <span className="rounded bg-amber-900/50 px-2 py-0.5 text-center text-xs font-medium text-amber-300">
+              Credit / selling
+            </span>
+          )}
+          <EnterPositionButton trade={trade} lotQty={lotQty} label={`Enter in broker (1 lot × ${lotQty})`} />
         </div>
       </div>
 
@@ -415,8 +659,11 @@ function BestTradeCard({ trade, capital }: { trade: ScanTrade; capital: number }
                   {leg.action}
                 </span>
                 <span className="font-mono font-semibold text-white">{leg.strike} {leg.optionType}</span>
+                {leg.scripCode != null && (
+                  <span className="text-[10px] text-slate-500">scrip {leg.scripCode}</span>
+                )}
               </div>
-              <div className="flex items-center gap-4 text-xs text-gray-400">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-400">
                 <span>LTP: <span className="font-mono text-white">₹{leg.premium}</span></span>
                 <span>IV: <span className="font-mono">{leg.iv.toFixed(1)}%</span></span>
                 <span>Δ: <span className="font-mono">{leg.delta.toFixed(2)}</span></span>
@@ -486,11 +733,93 @@ function BestTradeCard({ trade, capital }: { trade: ScanTrade; capital: number }
 
 // ─── Alternate Trade Card ───────────────────
 
-function AlternateCard({ trade }: { trade: ScanTrade }) {
+function CreditStrategyCard({ trade, lotQty }: { trade: ScanTrade; lotQty: number }) {
+  const tt = TRADE_TYPE_LABELS[trade.tradeType] || { icon: "?", label: trade.tradeType, color: "text-gray-400" };
+  return (
+    <div className="rounded-xl border border-amber-800/40 bg-amber-950/15 p-4 shadow-sm">
+      <StrategyFamilyRow tradeType={trade.tradeType} />
+      <div className="mb-2 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="text-lg">{tt.icon}</span>
+          <span className={`font-semibold ${tt.color}`}>{tt.label}</span>
+        </div>
+        <span className="text-xs text-amber-200/80">+₹{trade.netCredit} cr.</span>
+      </div>
+      <div className="mb-2 space-y-0.5 text-xs text-slate-400">
+        {trade.legs.map((leg, i) => (
+          <div key={i} className="font-mono text-slate-200">
+            {leg.action} {leg.strike} {leg.optionType} @₹{leg.premium}
+            {leg.scripCode ? <span className="ml-1 text-slate-600">· #{leg.scripCode}</span> : <span className="ml-1 text-rose-500">· no scrip</span>}
+          </div>
+        ))}
+      </div>
+      <EnterPositionButton trade={trade} lotQty={lotQty} className="w-full text-sm" label="Enter this structure" />
+    </div>
+  );
+}
+
+function EnterPositionButton({
+  trade,
+  lotQty,
+  label,
+  className = "",
+}: {
+  trade: ScanTrade;
+  lotQty: number;
+  label: string;
+  className?: string;
+}) {
+  const [busy, setBusy] = useState(false);
+  const missingScrip = trade.legs.some((l) => !l.scripCode);
+  return (
+    <button
+      type="button"
+      disabled={missingScrip || busy}
+      onClick={async () => {
+        if (!window.confirm(
+          `Place ${trade.legs.length} leg(s) in 5paisa — ${lotQty} qty each (1 NIFTY lot)?`,
+        )) {
+          return;
+        }
+        setBusy(true);
+        try {
+          const r = await api.trading.executeScan(
+            trade.legs.map((l) => ({
+              action: l.action,
+              scripCode: l.scripCode,
+              premium: l.premium,
+            })),
+            lotQty,
+          );
+          if (r.allOk) {
+            window.alert(
+              `OK — ${r.results.map((x) => (x.ok ? `Order ${x.orderId}` : `Fail ${x.error}`)).join("\n")}`,
+            );
+          } else {
+            window.alert(
+              r.results.map((x) => (x.ok ? `OK #${x.orderId}` : `ERR ${x.scripCode}: ${x.error}`)).join("\n") ||
+                "No response",
+            );
+          }
+        } catch (e) {
+          window.alert(e instanceof Error ? e.message : "Request failed");
+        } finally {
+          setBusy(false);
+        }
+      }}
+      className={`rounded-lg bg-amber-600 px-3 py-2 text-sm font-semibold text-amber-950 transition hover:bg-amber-500 disabled:cursor-not-allowed disabled:opacity-40 ${className}`}
+    >
+      {missingScrip ? "Scrip codes missing in chain" : busy ? "Placing…" : label}
+    </button>
+  );
+}
+
+function AlternateCard({ trade, lotQty }: { trade: ScanTrade; lotQty: number }) {
   const tt = TRADE_TYPE_LABELS[trade.tradeType] || { icon: "?", label: trade.tradeType, color: "text-gray-400" };
 
   return (
-    <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4 transition-colors hover:border-gray-600">
+    <div className="rounded-xl border border-slate-700 bg-slate-900/60 p-4 transition-colors hover:border-slate-600">
+      <StrategyFamilyRow tradeType={trade.tradeType} />
       <div className="mb-2 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span>{tt.icon}</span>
@@ -531,20 +860,184 @@ function AlternateCard({ trade }: { trade: ScanTrade }) {
       </div>
 
       <p className="mt-2 truncate text-xs text-gray-500">{trade.edge}</p>
+      <div className="mt-3">
+        <EnterPositionButton trade={trade} lotQty={lotQty} className="w-full text-xs" label="Enter in broker" />
+      </div>
+    </div>
+  );
+}
+
+// ─── Pro desk panels ────────────────────────
+
+function ProSignalBanner({ signal }: { signal: ProSignal }) {
+  const styles: Record<ProStatus, string> = {
+    ACTIVE: "border-emerald-600/80 bg-emerald-950/40 text-emerald-200",
+    STANDBY: "border-amber-600/80 bg-amber-950/40 text-amber-200",
+    AVOID: "border-rose-600/80 bg-rose-950/40 text-rose-200",
+    NO_TRADE: "border-slate-600 bg-slate-900/60 text-slate-300",
+  };
+  return (
+    <div className={`mb-4 rounded-xl border-2 px-4 py-3 ${styles[signal.status]}`}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-3">
+          <span className="rounded bg-black/30 px-2 py-1 text-xs font-bold uppercase tracking-wider">
+            {signal.status}
+          </span>
+          <span className="text-sm font-medium">
+            Alignment <span className="font-mono text-white">{signal.alignmentPct}%</span>
+          </span>
+        </div>
+        <p className="text-xs opacity-90">{signal.label}</p>
+      </div>
+    </div>
+  );
+}
+
+function FiiDiiPanel({ fii }: { fii: FiiDiiOut }) {
+  if (!fii.dataAvailable) {
+    return (
+      <div className="mb-4 rounded-lg border border-slate-700 bg-slate-900/40 px-4 py-3 text-sm text-slate-500">
+        <span className="font-semibold text-slate-400">FII / DII (cash &amp; derivatives)</span>
+        <span className="ml-2">{fii.message ?? "Unavailable"}</span>
+      </div>
+    );
+  }
+  return (
+    <div className="mb-4 overflow-hidden rounded-xl border border-indigo-900/50 bg-indigo-950/20">
+      <div className="border-b border-indigo-900/40 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-indigo-300">
+        Institutional flow (NSE) {fii.asOf ? `· as of ${fii.asOf}` : ""}
+        {fii.servedFromCache && fii.cacheNote && (
+          <span className="ml-2 font-normal text-indigo-400/80">({fii.cacheNote})</span>
+        )}
+      </div>
+      <div className="max-h-40 overflow-auto">
+        <table className="w-full text-left text-xs">
+          <thead className="sticky top-0 bg-indigo-950/80 text-indigo-400">
+            <tr>
+              <th className="px-3 py-2">Category</th>
+              <th className="px-3 py-2 text-right">Buy ₹</th>
+              <th className="px-3 py-2 text-right">Sell ₹</th>
+              <th className="px-3 py-2 text-right">Net ₹</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(fii.rows ?? []).map((r, i) => (
+              <tr key={i} className="border-t border-indigo-900/30 text-slate-300">
+                <td className="px-3 py-1.5">{r.category}</td>
+                <td className="px-3 py-1.5 text-right font-mono">{(r.buyValue / 1e7).toFixed(2)} Cr</td>
+                <td className="px-3 py-1.5 text-right font-mono">{(r.sellValue / 1e7).toFixed(2)} Cr</td>
+                <td className={`px-3 py-1.5 text-right font-mono ${r.netValue >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                  {(r.netValue / 1e7).toFixed(2)} Cr
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function ProIndicatorsPanel({ spot, ind }: { spot: number; ind: ProIndicators }) {
+  const ch = ind.chain;
+  return (
+    <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      {ind.macd && (
+        <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-3">
+          <div className="text-[10px] font-semibold uppercase text-slate-500">MACD (12,26,9)</div>
+          <div className="mt-1 font-mono text-sm text-white">
+            {ind.macd.macd.toFixed(2)} / {ind.macd.signal.toFixed(2)}
+            <span className="ml-2 text-xs text-cyan-400">hist {ind.macd.histogram.toFixed(2)}</span>
+          </div>
+          <div className="text-xs text-slate-500">{ind.macd.bias}</div>
+        </div>
+      )}
+      {ind.bollinger && (
+        <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-3">
+          <div className="text-[10px] font-semibold uppercase text-slate-500">Bollinger (20,2)</div>
+          <div className="mt-1 text-xs text-slate-300">
+            %B {ind.bollinger.percentB.toFixed(2)} · width {ind.bollinger.widthPct.toFixed(1)}%
+          </div>
+          <div className="text-xs text-amber-400/90">{ind.bollinger.position.replace(/_/g, " ")}</div>
+        </div>
+      )}
+      {ind.stochastic && (
+        <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-3">
+          <div className="text-[10px] font-semibold uppercase text-slate-500">Stochastic (14,3)</div>
+          <div className="mt-1 font-mono text-sm text-white">
+            %K {ind.stochastic.k} · %D {ind.stochastic.d}
+          </div>
+          <div className="text-xs text-slate-500">{ind.stochastic.zone}</div>
+        </div>
+      )}
+      {ch && (
+        <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-3 sm:col-span-2 lg:col-span-1">
+          <div className="text-[10px] font-semibold uppercase text-slate-500">Chain &amp; max pain</div>
+          <div className="mt-1 text-xs text-slate-300">
+            Max pain <span className="font-mono text-white">{ch.maxPain}</span>
+            {spot > 0 && ch.maxPain > 0 && (
+              <span className="text-slate-500"> (∆{Math.abs(spot - ch.maxPain)} vs spot)</span>
+            )}
+          </div>
+          <div className="text-xs text-slate-500">
+            PCR OI {ch.pcrOI.toFixed(2)} · Vol {ch.pcrVolume.toFixed(2)} · IV skew ATM {ch.ivSkewATM.toFixed(1)}%
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function OiBuildupPanel({ oi }: { oi: OiInsights }) {
+  const col = (title: string, rows: OiLegRow[]) => (
+    <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-2">
+      <div className="mb-1 text-[10px] font-semibold uppercase text-amber-500/90">{title}</div>
+      <table className="w-full text-[10px]">
+        <thead>
+          <tr className="text-slate-500">
+            <th className="py-0.5 text-left font-medium">K</th>
+            <th className="text-right font-medium">OI</th>
+            <th className="text-right font-medium">∆</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={`${title}-${r.strike}`} className="border-t border-slate-800/60 text-slate-300">
+              <td className="font-mono py-0.5">{r.strike}</td>
+              <td className="text-right text-slate-400">{formatLakh(r.oi)}</td>
+              <td className={`text-right font-mono ${r.changeInOi >= 0 ? "text-emerald-500/90" : "text-rose-400"}`}>
+                {r.changeInOi >= 0 ? "+" : ""}
+                {formatLakh(r.changeInOi)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+  return (
+    <div className="mb-6 rounded-xl border border-amber-900/30 bg-amber-950/10 p-4">
+      <h3 className="mb-1 text-sm font-semibold text-amber-200/90">OI build-up (chain)</h3>
+      <p className="mb-3 text-xs leading-relaxed text-slate-400">{oi.narrative}</p>
+      <div className="mb-3 flex flex-wrap gap-2 text-[11px]">
+        <span className="rounded border border-slate-700 bg-slate-800/60 px-2 py-1 text-slate-300">
+          CE net ∆ {formatLakh(oi.netCallOiChange)} <span className="text-slate-500">· {oi.callFlow}</span>
+        </span>
+        <span className="rounded border border-slate-700 bg-slate-800/60 px-2 py-1 text-slate-300">
+          PE net ∆ {formatLakh(oi.netPutOiChange)} <span className="text-slate-500">· {oi.putFlow}</span>
+        </span>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        {col("CE — by OI", oi.topCallByOi)}
+        {col("PE — by OI", oi.topPutByOi)}
+        {col("CE — by ∆ OI (adds)", oi.topCallByOiChange)}
+        {col("PE — by ∆ OI (adds)", oi.topPutByOiChange)}
+      </div>
     </div>
   );
 }
 
 // ─── Small Components ───────────────────────
-
-function CtxPill({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-lg bg-gray-800/60 px-3 py-2 text-center">
-      <div className="text-[10px] uppercase text-gray-500">{label}</div>
-      <div className="font-mono text-sm font-semibold text-white">{value}</div>
-    </div>
-  );
-}
 
 function MetricBox({ label, value, color, sub }: { label: string; value: string; color: string; sub?: string }) {
   return (

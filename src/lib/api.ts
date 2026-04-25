@@ -67,6 +67,24 @@ export const api = {
       apiFetch(`/strategy/auto-scan?capital=${capital}`),
   },
 
+  // ─── Live execution (5paisa) — use with care ─
+  trading: {
+    executeScan: (legs: Array<{ action: "BUY" | "SELL"; scripCode?: number; premium: number }>, quantity?: number) =>
+      apiFetch<{
+        results: Array<{
+          scripCode: number;
+          ok: boolean;
+          orderId?: string;
+          error?: string;
+        }>;
+        quantity: number;
+        allOk: boolean;
+      }>("/trading/execute-scan", {
+        method: "POST",
+        body: JSON.stringify({ legs, quantity }),
+      }),
+  },
+
   // ─── Backtest ────────────────────────────────
   backtest: {
     run: (params: any) =>
