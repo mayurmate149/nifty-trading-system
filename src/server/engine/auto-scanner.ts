@@ -29,6 +29,7 @@ import { TechnicalSnapshot } from "@/server/market-data/technicals";
 import type { ProfessionalIndicatorBundle } from "@/server/market-data/professional-indicators";
 import type { FiiDiiSnapshot, FiiDiiUnavailable } from "@/server/market-data/fii-dii";
 import { buildProTradeSignal, type ProTradeSignal } from "./scan-signal";
+import { buildScanTradingAlgo, type ScanTradingAlgo } from "./scan-trading-algo";
 
 // ─── Types ───────────────────────────────────
 
@@ -107,10 +108,13 @@ export interface ScanResult {
     atmIV: number;
     atmStraddle: number;       // ATM CE+PE premium
     expectedMove: number;      // ±points based on straddle
+    daysToExpiry: number;
   };
   professionalIndicators: ProfessionalIndicatorBundle;
   fiiDii: FiiDiiSnapshot | FiiDiiUnavailable | null;
   proSignal: ProTradeSignal;
+  /** Entry/exit targets, alerts, and suggested action (algo layer on top of pro signal) */
+  tradingAlgo: ScanTradingAlgo;
 }
 
 export interface AutoScanInput {
@@ -265,6 +269,17 @@ export function runAutoScan(input: AutoScanInput): ScanResult {
   const fii = input.fiiDii ?? null;
   const proSignal = buildProTradeSignal(bestTrade, ind, tech, spot, pro, fii);
 
+  const tradingAlgo = buildScanTradingAlgo({
+    bestTrade,
+    proSignal,
+    marketContext: {
+      spot,
+      vix: ind.vix,
+      expectedMove,
+      daysToExpiry: ind.daysToExpiry,
+    },
+  });
+
   return {
     bestTrade,
     alternates,
@@ -286,10 +301,12 @@ export function runAutoScan(input: AutoScanInput): ScanResult {
       atmIV,
       atmStraddle: r2(atmStraddle),
       expectedMove,
+      daysToExpiry: ind.daysToExpiry,
     },
     professionalIndicators: pro,
     fiiDii: fii,
     proSignal,
+    tradingAlgo,
   };
 }
 
@@ -975,6 +992,11 @@ function emptyScanResult(spot: number, ind: MarketIndicators, tech: TechnicalSna
   const pro = EMPTY_PRO;
   const fii = null;
   const proSignal = buildProTradeSignal(null, ind, tech, spot, pro, fii);
+  const tradingAlgo = buildScanTradingAlgo({
+    bestTrade: null,
+    proSignal,
+    marketContext: { spot, vix: ind.vix, expectedMove: 0, daysToExpiry: ind.daysToExpiry },
+  });
   return {
     bestTrade: null,
     alternates: [],
@@ -996,10 +1018,12 @@ function emptyScanResult(spot: number, ind: MarketIndicators, tech: TechnicalSna
       atmIV: 0,
       atmStraddle: 0,
       expectedMove: 0,
+      daysToExpiry: ind.daysToExpiry,
     },
     professionalIndicators: pro,
     fiiDii: fii,
     proSignal,
+    tradingAlgo,
   };
 }
 

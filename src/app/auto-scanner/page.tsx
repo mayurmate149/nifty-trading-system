@@ -130,11 +130,44 @@ interface ScanResult {
     atmIV: number;
     atmStraddle: number;
     expectedMove: number;
+    daysToExpiry: number;
   };
   professionalIndicators?: ProIndicators;
   fiiDii?: FiiDiiOut | null;
   proSignal?: ProSignal;
+  tradingAlgo?: TradingAlgo;
   error?: string;
+}
+
+type AlgoAction = "ENTER" | "PREPARE" | "WAIT" | "STAND_DOWN" | "NO_SETUP";
+
+interface TradingAlgo {
+  suggestedAction: AlgoAction;
+  entryHeadline: string;
+  entryDetail: string;
+  entryReadiness: number;
+  fingerprint: string;
+  isEntryWindow: boolean;
+  exitPlan: {
+    takeProfitRupees: number;
+    takeProfitPctOfMaxProfit: number;
+    softStopLossRupees: number;
+    softStopPctOfMaxLoss: number;
+    hardStopLossRupees: number;
+    spotBufferPoints: number;
+    breakevenLevels: string;
+    timeExitRule: string;
+    ivExitRule: string;
+    checklists: { label: string; detail: string }[];
+  } | null;
+  alerts: {
+    id: string;
+    kind: string;
+    level: "info" | "warning" | "critical";
+    title: string;
+    message: string;
+    fireBrowser: boolean;
+  }[];
 }
 
 interface HistoryEntry {
@@ -229,6 +262,10 @@ export default function AutoScannerPage() {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [scanCount, setScanCount] = useState(0);
   const lastTradeRef = useRef<string | null>(null);
+  const algoNotifyRef = useRef<{ lastAction: string; lastBestId: string | null }>({
+    lastAction: "",
+    lastBestId: null,
+  });
 
   const { data, isLoading, isFetching, error } = useQuery<ScanResult>({
     queryKey: ["auto-scan", capital],
@@ -257,6 +294,29 @@ export default function AutoScannerPage() {
       ...prev.slice(0, 19), // keep last 20
     ]);
   }, [data?.bestTrade?.id]);
+
+  // Browser alert when the desk first signals ENTER, or the top pick changes while still ENTER
+  useEffect(() => {
+    const algo = data?.tradingAlgo;
+    const id = data?.bestTrade?.id ?? null;
+    if (!algo || !data?.bestTrade || typeof window === "undefined" || !("Notification" in window)) return;
+    if (algo.suggestedAction !== "ENTER") {
+      algoNotifyRef.current = { lastAction: algo.suggestedAction, lastBestId: id };
+      return;
+    }
+    if (Notification.permission !== "granted") return;
+    const prev = algoNotifyRef.current;
+    const firstEnter = prev.lastAction !== "ENTER";
+    const newPick = id != null && prev.lastBestId !== id;
+    if (firstEnter || newPick) {
+      const tt = TRADE_TYPE_LABELS[data.bestTrade.tradeType]?.label ?? data.bestTrade.tradeType;
+      new Notification("NIFTY Pro Desk — entry signal", {
+        body: `${tt}: ${algo.entryHeadline}. Check exit ₹ targets on the page.`,
+        tag: `autoscan-${id ?? "x"}`,
+      });
+    }
+    algoNotifyRef.current = { lastAction: "ENTER", lastBestId: id };
+  }, [data?.tradingAlgo, data?.bestTrade?.id, data?.bestTrade?.tradeType]);
 
   const ctx = data?.marketContext;
   const best = data?.bestTrade;
@@ -399,6 +459,13 @@ export default function AutoScannerPage() {
       )}
 
       {data?.proSignal && <ProSignalBanner signal={data.proSignal} />}
+
+      {data?.tradingAlgo && (
+        <TradingAlgoPanel
+          algo={data.tradingAlgo}
+          daysToExpiry={data.marketContext?.daysToExpiry ?? 0}
+        />
+      )}
 
       {/* Advanced: institutions + indicators — collapsible */}
       {(data?.fiiDii || data?.professionalIndicators) && (
@@ -868,6 +935,141 @@ function AlternateCard({ trade, lotQty }: { trade: ScanTrade; lotQty: number }) 
 }
 
 // ─── Pro desk panels ────────────────────────
+
+const ALGO_ACTION_STYLES: Record<
+  AlgoAction,
+  { border: string; bg: string; text: string; pill: string }
+> = {
+  ENTER: { border: "border-emerald-500/60", bg: "from-emerald-950/50 to-slate-950/80", text: "text-emerald-200", pill: "bg-emerald-600 text-white" },
+  PREPARE: { border: "border-amber-500/50", bg: "from-amber-950/40 to-slate-950/80", text: "text-amber-100", pill: "bg-amber-600 text-white" },
+  WAIT: { border: "border-slate-600", bg: "from-slate-900/80 to-slate-950/90", text: "text-slate-300", pill: "bg-slate-600 text-slate-100" },
+  STAND_DOWN: { border: "border-rose-500/50", bg: "from-rose-950/30 to-slate-950/90", text: "text-rose-200", pill: "bg-rose-700 text-white" },
+  NO_SETUP: { border: "border-slate-700", bg: "from-slate-900/60 to-slate-950/90", text: "text-slate-400", pill: "bg-slate-700 text-slate-200" },
+};
+
+function TradingAlgoPanel({ algo, daysToExpiry }: { algo: TradingAlgo; daysToExpiry: number }) {
+  const st = ALGO_ACTION_STYLES[algo.suggestedAction] ?? ALGO_ACTION_STYLES.WAIT;
+  const [notif, setNotif] = useState<NotificationPermission | "unsupported">("default");
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      setNotif("unsupported");
+      return;
+    }
+    setNotif(Notification.permission);
+  }, []);
+
+  const requestNotif = () => {
+    if (!("Notification" in window)) return;
+    void Notification.requestPermission().then((p) => setNotif(p));
+  };
+
+  return (
+    <div
+      className={`mb-6 overflow-hidden rounded-2xl border-2 ${st.border} bg-gradient-to-b ${st.bg} shadow-lg shadow-black/20`}
+    >
+      <div className="border-b border-white/5 px-4 py-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500">Algo: entry &amp; exit</h2>
+          <div className="flex flex-wrap items-center gap-2">
+            {notif === "default" && (
+              <button
+                type="button"
+                onClick={requestNotif}
+                className="rounded-md bg-violet-600 px-2.5 py-1 text-[10px] font-medium text-white hover:bg-violet-500"
+              >
+                Enable browser entry alerts
+              </button>
+            )}
+            {notif === "granted" && (
+              <span className="text-[10px] text-emerald-500/90">Browser alerts on</span>
+            )}
+            {notif === "denied" && <span className="text-[10px] text-rose-500/80">Notifications blocked in browser</span>}
+            <span className="text-[10px] text-slate-600">DTE {daysToExpiry}</span>
+          </div>
+        </div>
+      </div>
+      <div className="px-4 py-3">
+        <div className="flex flex-wrap items-start gap-3">
+          <span className={`rounded-md px-2.5 py-1 text-xs font-bold ${st.pill}`}>
+            {algo.suggestedAction.replace(/_/g, " ")}
+          </span>
+          <div>
+            <p className={`text-base font-semibold ${st.text}`}>{algo.entryHeadline}</p>
+            <p className="mt-1 text-sm leading-relaxed text-slate-400">{algo.entryDetail}</p>
+            <div className="mt-3 h-1.5 max-w-md overflow-hidden rounded-full bg-slate-800/80">
+              <div
+                className="h-full rounded-full bg-cyan-500/80 transition-all"
+                style={{ width: `${Math.min(100, Math.max(4, algo.entryReadiness))}%` }}
+              />
+            </div>
+            <p className="mt-0.5 text-[10px] text-slate-500">Readiness (model) {algo.entryReadiness}%</p>
+          </div>
+        </div>
+
+        {algo.exitPlan && (
+          <div className="mt-5 grid gap-3 border-t border-white/5 pt-4 sm:grid-cols-2">
+            <div>
+              <h3 className="text-[10px] font-semibold uppercase tracking-wide text-cyan-600/90">When to take profit (exit / scale)</h3>
+              <ul className="mt-2 space-y-1.5 text-xs text-slate-300">
+                <li>
+                  <span className="text-slate-500">TP target: </span>
+                  <span className="font-mono text-emerald-300">
+                    ~₹{algo.exitPlan.takeProfitRupees.toLocaleString("en-IN")}
+                  </span>
+                  <span className="text-slate-500"> ({algo.exitPlan.takeProfitPctOfMaxProfit}% of model max profit)</span>
+                </li>
+                <li>
+                  <span className="text-slate-500">Soft stop: </span>
+                  <span className="font-mono text-amber-300">~₹{algo.exitPlan.softStopLossRupees.toLocaleString("en-IN")}</span>
+                  <span className="text-slate-500"> (≈{algo.exitPlan.softStopPctOfMaxLoss}% of max loss)</span>
+                </li>
+                <li>
+                  <span className="text-slate-500">Max loss (defined risk): </span>
+                  <span className="font-mono text-rose-300/90">~₹{algo.exitPlan.hardStopLossRupees.toLocaleString("en-IN")}</span>
+                </li>
+                <li>
+                  <span className="text-slate-500">Breakeven (model): </span>
+                  <span className="font-mono text-slate-200">{algo.exitPlan.breakevenLevels}</span> — exit if spot &gt;{" "}
+                  {algo.exitPlan.spotBufferPoints} pts through the wrong side
+                </li>
+              </ul>
+            </div>
+            <div>
+              <h3 className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Time &amp; vol</h3>
+              <p className="mt-2 text-xs leading-relaxed text-slate-400">{algo.exitPlan.timeExitRule}</p>
+              <p className="mt-2 text-xs leading-relaxed text-slate-500">{algo.exitPlan.ivExitRule}</p>
+            </div>
+          </div>
+        )}
+
+        {algo.alerts.length > 0 && (
+          <ul className="mt-4 space-y-1 border-t border-white/5 pt-3 text-[11px] text-slate-500">
+            {algo.alerts.map((a) => (
+              <li key={a.id} className="flex gap-2">
+                <span
+                  className={
+                    a.level === "critical" ? "text-rose-400" : a.level === "warning" ? "text-amber-400" : "text-slate-500"
+                  }
+                >
+                  {a.kind}
+                </span>
+                <span>
+                  <span className="font-medium text-slate-400">{a.title}:</span> {a.message}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <p className="mt-3 text-[10px] leading-relaxed text-slate-600">
+          Not financial advice. Alerts fire when the desk first goes to ENTER or the top-pick id changes. Track MTM in your
+          broker; model uses chain snapshot, not your fill prices.
+        </p>
+      </div>
+    </div>
+  );
+}
 
 function ProSignalBanner({ signal }: { signal: ProSignal }) {
   const styles: Record<ProStatus, string> = {
