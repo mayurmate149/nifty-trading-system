@@ -4,7 +4,7 @@
  * Trade Suggestions Page — Options SELLER Focused
  *
  * Phase 6: Strategy scanner for NIFTY 50.
- * Primary: Seller strategies (Iron Condor, Credit Spread, Short Straddle, Short Strangle, Scalp Sell)
+ * Primary: Seller strategies (Iron Condor, Credit Spread, Short Straddle, Short Iron Fly)
  * Secondary: Buyer strategies (Debit Spread, Directional Buy) — only extreme conditions
  */
 
@@ -20,18 +20,24 @@ import { api } from "@/lib/api";
 
 const STRATEGIES: { value: StrategyType | "ALL"; label: string; icon: string; seller: boolean }[] = [
   { value: "ALL", label: "All Strategies", icon: "🔍", seller: true },
-  // ─── SELLER (primary) ───
-  { value: "IRON_CONDOR", label: "Iron Condor", icon: "🦅", seller: true },
-  { value: "CREDIT_SPREAD", label: "Credit Spread", icon: "💳", seller: true },
-  { value: "SHORT_STRADDLE", label: "Short Straddle", icon: "⚡", seller: true },
-  { value: "SHORT_STRANGLE", label: "Short Strangle", icon: "🔀", seller: true },
-  { value: "SCALP_SELL", label: "Scalp Sell", icon: "⏱️", seller: true },
-  // ─── BUYER (only extreme) ───
-  { value: "DEBIT_SPREAD", label: "Debit Spread", icon: "�", seller: false },
+  // ─── CREDIT (seller) ───
+  { value: "BULL_PUT_SPREAD", label: "Bull Put Spread", icon: "🟢", seller: true },
+  { value: "BEAR_CALL_SPREAD", label: "Bear Call Spread", icon: "🔴", seller: true },
+  { value: "IRON_FLY", label: "Iron Fly", icon: "🦋", seller: true },
+  { value: "SHORT_IRON_CONDOR", label: "Short Iron Condor", icon: "🦅", seller: true },
+  // ─── DEBIT (buyer) ───
+  { value: "BULL_CALL_SPREAD", label: "Bull Call Spread", icon: "📈", seller: false },
+  { value: "BEAR_PUT_SPREAD", label: "Bear Put Spread", icon: "📉", seller: false },
   { value: "DIRECTIONAL_BUY", label: "Directional Buy", icon: "🎯", seller: false },
+  { value: "NAKED_BUY", label: "Naked Buy CE/PE", icon: "🚀", seller: false },
 ];
 
-const SELLER_SET = new Set<string>(["IRON_CONDOR", "CREDIT_SPREAD", "SHORT_STRADDLE", "SHORT_STRANGLE", "SCALP_SELL"]);
+const SELLER_SET = new Set<string>([
+  "BULL_PUT_SPREAD",
+  "BEAR_CALL_SPREAD",
+  "IRON_FLY",
+  "SHORT_IRON_CONDOR",
+]);
 
 const TIER_COLORS: Record<string, string> = {
   HIGH: "bg-green-900/50 text-green-400 border-green-700",

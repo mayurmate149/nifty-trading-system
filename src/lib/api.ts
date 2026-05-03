@@ -65,6 +65,7 @@ export const api = {
       }),
     autoScan: (capital: number = 200000) =>
       apiFetch(`/strategy/auto-scan?capital=${capital}`),
+    monitor: () => apiFetch(`/strategy/monitor`),
   },
 
   // ─── Live execution (5paisa) — use with care ─

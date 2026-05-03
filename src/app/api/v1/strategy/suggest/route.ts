@@ -4,6 +4,8 @@ import { fetchOptionsChain, fetchLiveSpotData, fetchMarketSnapshot, fetchOHLC } 
 import { classifyTrend } from "@/server/market-data/trend";
 import { calculateSupportResistance } from "@/server/market-data/support-resistance";
 import { computeIVPercentile } from "@/server/market-data/analytics";
+import { computeTechnicals } from "@/server/market-data/technicals";
+import { buildProfessionalBundle } from "@/server/market-data/professional-indicators";
 import { generateSuggestions } from "@/server/engine/suggest";
 import type { MarketIndicators } from "@/types/market";
 import type { SuggestRequest, SuggestResponse } from "@/types/strategy";
@@ -107,9 +109,18 @@ export async function POST(request: NextRequest) {
       );
 
       // ─── 3. Run Engine ─────────────────────────
+      const technicals = computeTechnicals(bars);
+      const professional = buildProfessionalBundle(
+        bars,
+        chainResponse.chain,
+        chainResponse.atmStrike,
+      );
+
       const result: SuggestResponse = generateSuggestions({
         indicators,
         chainResponse,
+        technicals,
+        professional,
         request: {
           symbol,
           expiry,

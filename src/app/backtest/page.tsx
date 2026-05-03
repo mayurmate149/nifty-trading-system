@@ -9,7 +9,7 @@
 import { useState } from "react";
 
 export default function BacktestPage() {
-  const [strategy, setStrategy] = useState("IRON_CONDOR");
+  const [strategy, setStrategy] = useState("BULL_PUT_SPREAD");
   const [symbol, setSymbol] = useState("NIFTY");
   const [dateFrom, setDateFrom] = useState("2025-01-01");
   const [dateTo, setDateTo] = useState("2025-04-13");
@@ -53,13 +53,14 @@ export default function BacktestPage() {
             onChange={(e) => setStrategy(e.target.value)}
             className="w-full rounded bg-gray-800 px-3 py-2 text-sm"
           >
-            <option value="IRON_CONDOR">Iron Condor</option>
-            <option value="CREDIT_SPREAD">Credit Spread</option>
-            <option value="SHORT_STRADDLE">Short Straddle</option>
-            <option value="SHORT_STRANGLE">Short Strangle</option>
-            <option value="SCALP_SELL">Scalp Sell</option>
-            <option value="DEBIT_SPREAD">Debit Spread</option>
+            <option value="BULL_CALL_SPREAD">Bull Call Spread</option>
+            <option value="BULL_PUT_SPREAD">Bull Put Spread</option>
+            <option value="BEAR_PUT_SPREAD">Bear Put Spread</option>
+            <option value="BEAR_CALL_SPREAD">Bear Call Spread</option>
+            <option value="IRON_FLY">Iron Fly</option>
+            <option value="SHORT_IRON_CONDOR">Short Iron Condor</option>
             <option value="DIRECTIONAL_BUY">Directional Buy</option>
+            <option value="NAKED_BUY">Naked Buy CE/PE</option>
           </select>
         </div>
         <div>

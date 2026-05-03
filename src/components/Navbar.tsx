@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { href: "/journal", label: "📓 Journal" },
   { href: "/positions", label: "📊 Positions" },
   { href: "/option-chain-live", label: "📡 Option Chain" },
+  { href: "/pro-trader", label: "⚡ Pro Trader" },
   { href: "/auto-scanner", label: "📊 Pro Desk" },
   { href: "/trade-suggestions", label: "🎯 Trades" },
   { href: "/backtest", label: "🔬 Backtest" },

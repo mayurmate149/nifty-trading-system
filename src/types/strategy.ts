@@ -1,13 +1,14 @@
 // ─── Strategy & Trade Suggestion Types ──────
 
 export type StrategyType =
-  | "IRON_CONDOR"
-  | "CREDIT_SPREAD"
-  | "SHORT_STRADDLE"
-  | "SHORT_STRANGLE"
-  | "SCALP_SELL"
-  | "DEBIT_SPREAD"
-  | "DIRECTIONAL_BUY";
+  | "BULL_CALL_SPREAD"
+  | "BULL_PUT_SPREAD"
+  | "BEAR_PUT_SPREAD"
+  | "BEAR_CALL_SPREAD"
+  | "IRON_FLY"
+  | "SHORT_IRON_CONDOR"
+  | "DIRECTIONAL_BUY"
+  | "NAKED_BUY";
 
 export type LegType =
   | "BUY_CALL"
@@ -19,8 +20,8 @@ export type ConfidenceTier = "HIGH" | "MEDIUM" | "LOW";
 
 export type TradeDirection = "BULLISH" | "BEARISH" | "NEUTRAL";
 
-/** Whether the strategy is a net-premium seller or buyer */
-export type StrategyBias = "SELLER" | "BUYER";
+/** Whether the strategy collects net premium (CREDIT) or pays net premium (DEBIT). */
+export type StrategyBias = "CREDIT" | "DEBIT";
 
 export interface StrategyLeg {
   type: LegType;
@@ -97,134 +98,97 @@ export interface StrategyMeta {
   legs: number;
   bias: StrategyBias;
   direction: TradeDirection[];
-  idealConditions: {
-    trends: string[];
-    pcrRange: [number, number];
-    ivPercentileRange: [number, number];
-    vixRange: [number, number];
-  };
   riskProfile: "LIMITED" | "UNLIMITED";
   timeframe: "INTRADAY" | "POSITIONAL" | "BOTH";
 }
 
 export const STRATEGY_META: Record<StrategyType, StrategyMeta> = {
-  IRON_CONDOR: {
-    type: "IRON_CONDOR",
-    name: "Iron Condor",
-    description: "Sell OTM call + put spreads; collect premium in range-bound markets",
+  BULL_CALL_SPREAD: {
+    type: "BULL_CALL_SPREAD",
+    name: "Bull Call Spread",
+    description: "Buy ATM CE + sell OTM CE — cheap, capped-risk bullish debit.",
+    icon: "📈",
+    legs: 2,
+    bias: "DEBIT",
+    direction: ["BULLISH"],
+    riskProfile: "LIMITED",
+    timeframe: "BOTH",
+  },
+  BULL_PUT_SPREAD: {
+    type: "BULL_PUT_SPREAD",
+    name: "Bull Put Spread",
+    description: "Sell OTM PE + buy further OTM PE — bullish credit spread.",
+    icon: "🟢",
+    legs: 2,
+    bias: "CREDIT",
+    direction: ["BULLISH"],
+    riskProfile: "LIMITED",
+    timeframe: "BOTH",
+  },
+  BEAR_PUT_SPREAD: {
+    type: "BEAR_PUT_SPREAD",
+    name: "Bear Put Spread",
+    description: "Buy ATM PE + sell OTM PE — cheap, capped-risk bearish debit.",
+    icon: "📉",
+    legs: 2,
+    bias: "DEBIT",
+    direction: ["BEARISH"],
+    riskProfile: "LIMITED",
+    timeframe: "BOTH",
+  },
+  BEAR_CALL_SPREAD: {
+    type: "BEAR_CALL_SPREAD",
+    name: "Bear Call Spread",
+    description: "Sell OTM CE + buy further OTM CE — bearish credit spread.",
+    icon: "🔴",
+    legs: 2,
+    bias: "CREDIT",
+    direction: ["BEARISH"],
+    riskProfile: "LIMITED",
+    timeframe: "BOTH",
+  },
+  IRON_FLY: {
+    type: "IRON_FLY",
+    name: "Iron Fly",
+    description: "Sell ATM straddle + buy wings — pinned-range credit with capped loss.",
+    icon: "🦋",
+    legs: 4,
+    bias: "CREDIT",
+    direction: ["NEUTRAL"],
+    riskProfile: "LIMITED",
+    timeframe: "BOTH",
+  },
+  SHORT_IRON_CONDOR: {
+    type: "SHORT_IRON_CONDOR",
+    name: "Short Iron Condor",
+    description: "Sell OTM call spread + OTM put spread — wide-range neutral credit.",
     icon: "🦅",
     legs: 4,
-    bias: "SELLER",
+    bias: "CREDIT",
     direction: ["NEUTRAL"],
-    idealConditions: {
-      trends: ["range-bound"],
-      pcrRange: [0.7, 1.3],
-      ivPercentileRange: [30, 85],
-      vixRange: [12, 25],
-    },
     riskProfile: "LIMITED",
     timeframe: "POSITIONAL",
-  },
-  CREDIT_SPREAD: {
-    type: "CREDIT_SPREAD",
-    name: "Credit Spread",
-    description: "Sell OTM spread for directional bias; collect premium with limited risk",
-    icon: "💳",
-    legs: 2,
-    bias: "SELLER",
-    direction: ["BULLISH", "BEARISH"],
-    idealConditions: {
-      trends: ["trend-up", "trend-down"],
-      pcrRange: [0.5, 1.5],
-      ivPercentileRange: [25, 85],
-      vixRange: [12, 28],
-    },
-    riskProfile: "LIMITED",
-    timeframe: "BOTH",
-  },
-  SHORT_STRADDLE: {
-    type: "SHORT_STRADDLE",
-    name: "Short Straddle",
-    description: "Sell ATM call + put; profit from theta decay in sideways markets",
-    icon: "⚡",
-    legs: 2,
-    bias: "SELLER",
-    direction: ["NEUTRAL"],
-    idealConditions: {
-      trends: ["range-bound"],
-      pcrRange: [0.75, 1.25],
-      ivPercentileRange: [40, 90],
-      vixRange: [13, 25],
-    },
-    riskProfile: "UNLIMITED",
-    timeframe: "BOTH",
-  },
-  SHORT_STRANGLE: {
-    type: "SHORT_STRANGLE",
-    name: "Short Strangle",
-    description: "Sell OTM call + put; wider profit zone, theta decay",
-    icon: "🔀",
-    legs: 2,
-    bias: "SELLER",
-    direction: ["NEUTRAL"],
-    idealConditions: {
-      trends: ["range-bound"],
-      pcrRange: [0.7, 1.3],
-      ivPercentileRange: [35, 90],
-      vixRange: [13, 25],
-    },
-    riskProfile: "UNLIMITED",
-    timeframe: "BOTH",
-  },
-  SCALP_SELL: {
-    type: "SCALP_SELL",
-    name: "Scalp Sell",
-    description: "Quick intraday option sell for fast theta/premium capture",
-    icon: "⏱️",
-    legs: 1,
-    bias: "SELLER",
-    direction: ["BULLISH", "BEARISH"],
-    idealConditions: {
-      trends: ["range-bound", "trend-up", "trend-down"],
-      pcrRange: [0.5, 1.5],
-      ivPercentileRange: [20, 80],
-      vixRange: [10, 30],
-    },
-    riskProfile: "UNLIMITED",
-    timeframe: "INTRADAY",
-  },
-  DEBIT_SPREAD: {
-    type: "DEBIT_SPREAD",
-    name: "Debit Spread",
-    description: "Buy ATM + sell OTM for directional move with capped risk (hedging)",
-    icon: "�",
-    legs: 2,
-    bias: "BUYER",
-    direction: ["BULLISH", "BEARISH"],
-    idealConditions: {
-      trends: ["trend-up", "trend-down"],
-      pcrRange: [0.4, 1.6],
-      ivPercentileRange: [5, 35],
-      vixRange: [8, 18],
-    },
-    riskProfile: "LIMITED",
-    timeframe: "BOTH",
   },
   DIRECTIONAL_BUY: {
     type: "DIRECTIONAL_BUY",
     name: "Directional Buy",
-    description: "Buy ATM/OTM option — only for very strong breakouts (hedge/lotto)",
+    description: "Buy ATM / slight-ITM CE or PE on a confirmed, strong trend with cheap IV.",
     icon: "🎯",
     legs: 1,
-    bias: "BUYER",
+    bias: "DEBIT",
     direction: ["BULLISH", "BEARISH"],
-    idealConditions: {
-      trends: ["trend-up", "trend-down"],
-      pcrRange: [0.3, 1.7],
-      ivPercentileRange: [5, 30],
-      vixRange: [8, 16],
-    },
     riskProfile: "LIMITED",
     timeframe: "BOTH",
+  },
+  NAKED_BUY: {
+    type: "NAKED_BUY",
+    name: "Naked Buy CE/PE",
+    description: "Buy OTM CE or PE on a strong breakout — lotto-grade R:R.",
+    icon: "🚀",
+    legs: 1,
+    bias: "DEBIT",
+    direction: ["BULLISH", "BEARISH"],
+    riskProfile: "LIMITED",
+    timeframe: "INTRADAY",
   },
 };

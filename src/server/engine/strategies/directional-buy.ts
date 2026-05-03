@@ -1,55 +1,53 @@
 /**
- * Directional Buy Strategy
+ * Directional Buy — DEBIT, single-leg, trend-aligned.
  *
- * Buy ATM/slight OTM call (bullish) or put (bearish).
- * Best in: Strong trend, low IV, clear momentum.
+ *   BUY ATM / slightly-ITM Call (bullish trend) or Put (bearish trend).
+ *
+ * The strategy is direction-agnostic: side (CE/PE) is picked at strike-
+ * selection time from the live trend. The rule stack therefore uses trend-
+ * aligned predicates rather than hard-coding a direction.
  */
 
-import { MarketIndicators } from "@/types/market";
+import type { StrategyRules } from "../strategy-rules/types";
+import {
+  directionalTrendRule,
+  dteBetweenRule,
+  emaAlignsWithTrendRule,
+  ivPercentileRule,
+  macdAlignsWithTrendRule,
+  momentumAlignsWithTrendRule,
+  rsiAlignsWithTrendRule,
+  superTrendAlignsWithTrendRule,
+  volumeSpikeRule,
+  vwapAlignsWithTrendRule,
+} from "../strategy-rules/common-rules";
 
-export const directionalBuyStrategy = {
-  name: "DIRECTIONAL_BUY" as const,
-  description: "Buy ATM/slightly OTM option in trending market",
+export const directionalBuyRules: StrategyRules = {
+  key: "DIRECTIONAL_BUY",
+  name: "Directional Buy",
+  icon: "🎯",
+  bias: "DEBIT",
+  direction: "NEUTRAL", // side resolved from live trend at strike-selection
   legs: 1,
-
-  idealConditions: {
-    trends: ["trend-up", "trend-down"] as const,
-    ivPercentileMax: 40,
-    pcrRange: [0.4, 1.6] as [number, number],
-    vixRange: [8, 18] as [number, number],
-  },
-
-  checkEntry(indicators: MarketIndicators): { suitable: boolean; reasons: string[] } {
-    const reasons: string[] = [];
-    let suitable = false;
-
-    if (indicators.trend === "trend-up" && indicators.trendStrength >= 50) {
-      suitable = true;
-      reasons.push(`Strong uptrend (${indicators.trendStrength}%) — buy CE`);
-    } else if (indicators.trend === "trend-down" && indicators.trendStrength >= 50) {
-      suitable = true;
-      reasons.push(`Strong downtrend (${indicators.trendStrength}%) — buy PE`);
-    } else if (indicators.trend !== "range-bound") {
-      reasons.push(`Weak ${indicators.trend} — wait for confirmation`);
-    } else {
-      reasons.push("Range-bound — directional buy risky, skip");
-    }
-
-    if (indicators.ivPercentile <= 30) {
-      reasons.push(`Low IV (${indicators.ivPercentile}%) — cheap options, good for buying`);
-    } else if (indicators.ivPercentile <= 50) {
-      reasons.push(`Moderate IV (${indicators.ivPercentile}%) — acceptable`);
-    } else {
-      reasons.push(`High IV (${indicators.ivPercentile}%) — expensive, risk of IV crush`);
-      suitable = false;
-    }
-
-    return { suitable, reasons };
-  },
-
+  riskProfile: "LIMITED",
+  summary: "Buy ATM / slight-ITM CE or PE on a confirmed, strong trend with cheap IV.",
+  rules: [
+    // A directional debit buy *must* have a live directional trend — the
+    // one critical gate. Everything else weighs toward match %.
+    directionalTrendRule(45, 3, true),
+    emaAlignsWithTrendRule(3, false),
+    superTrendAlignsWithTrendRule(3, false),
+    rsiAlignsWithTrendRule(2),
+    macdAlignsWithTrendRule(2),
+    vwapAlignsWithTrendRule(2),
+    momentumAlignsWithTrendRule(0.3, 2),
+    ivPercentileRule(5, 55, 3, false),
+    volumeSpikeRule(1),
+    dteBetweenRule(2, 10, 1, false),
+  ],
   exitRules: {
-    stopLoss: "SL at 30% of premium paid",
-    target: "TP at 50-100% premium gain (or trail)",
+    stopLoss: "SL at 30% of premium paid; exit if trend flips on EMA / SuperTrend",
+    target: "50-100% premium gain, or trail once in profit",
     trailingSL: "After 30% gain, trail SL to cost",
     timeExit: "Close before 2 days to expiry (theta burn)",
   },

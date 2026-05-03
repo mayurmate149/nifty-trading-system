@@ -1,92 +1,100 @@
 /**
- * Trade Suggestion Engine – Orchestrator
+ * Trade Suggestion Engine — 8-strategy rule-based scanner
  *
- * Options SELLER focused.
- * Ties together: strategy entry checks → strike selection → scoring
- * Returns a ranked list of TradeSuggestion objects.
- *
- * Seller strategies (IC, Credit Spread, Short Straddle, Short Strangle, Scalp Sell)
- * are evaluated first and get a scoring bonus.
- * Buyer strategies (Debit Spread, Directional Buy) only shown in extreme conditions.
+ * Thin wrapper over the rule engine: evaluates every strategy, picks the best
+ * live strike selection from `selectStrikes`, and converts the result into
+ * the legacy `TradeSuggestion` shape the /trade-suggestions page consumes.
  */
 
 import {
   StrategyType,
   TradeSuggestion,
-  TradeDirection,
   ConfidenceTier,
   SuggestRequest,
   SuggestResponse,
   STRATEGY_META,
 } from "@/types/strategy";
-import { MarketIndicators, OptionChainStrike, OptionsChainResponse } from "@/types/market";
-import { selectStrikes, StrikeSelection } from "./strike-selector";
-import { scoreStrategy, ScoringResult } from "./scorer";
+import {
+  MarketIndicators,
+  OptionsChainResponse,
+} from "@/types/market";
+import type { TechnicalSnapshot } from "@/server/market-data/technicals";
+import type { ProfessionalIndicatorBundle } from "@/server/market-data/professional-indicators";
+import { computeMaxPain } from "@/server/market-data/professional-indicators";
+import { selectStrikes } from "./strike-selector";
+import { scoreStrategy } from "./scorer";
+import { ALL_STRATEGY_RULES } from "./strategies";
+import { evaluateStrategyRules } from "./strategy-rules/run";
+import type {
+  ChainDerived,
+  StrategyEvalContext,
+  StrategyRules,
+} from "./strategy-rules/types";
 
-import { ironCondorStrategy } from "./strategies/iron-condor";
-import { creditSpreadStrategy } from "./strategies/credit-spread";
-import { shortStraddleStrategy } from "./strategies/short-straddle";
-import { shortStrangleStrategy } from "./strategies/short-strangle";
-import { scalpSellStrategy } from "./strategies/scalp-sell";
-import { debitSpreadStrategy } from "./strategies/debit-spread";
-import { directionalBuyStrategy } from "./strategies/directional-buy";
+// ─── Registry (strategy → rules) ────────────────────────────────────────────
 
-// ─── Strategy registry ──────────────────────
+const STRATEGY_RULES: Record<StrategyType, StrategyRules> = Object.fromEntries(
+  ALL_STRATEGY_RULES.map((r) => [r.key, r]),
+) as Record<StrategyType, StrategyRules>;
 
-const STRATEGY_CHECKERS: Record<
-  StrategyType,
-  { checkEntry: (ind: MarketIndicators) => { suitable: boolean; reasons: string[] }; exitRules: Record<string, string> }
-> = {
-  IRON_CONDOR: ironCondorStrategy,
-  CREDIT_SPREAD: creditSpreadStrategy,
-  SHORT_STRADDLE: shortStraddleStrategy,
-  SHORT_STRANGLE: shortStrangleStrategy,
-  SCALP_SELL: scalpSellStrategy,
-  DEBIT_SPREAD: debitSpreadStrategy,
-  DIRECTIONAL_BUY: directionalBuyStrategy,
-};
+const ALL_STRATEGIES: StrategyType[] = ALL_STRATEGY_RULES.map((r) => r.key);
 
-/** Seller strategies first — these are the primary focus */
-const ALL_STRATEGIES: StrategyType[] = [
-  "IRON_CONDOR",
-  "CREDIT_SPREAD",
-  "SHORT_STRADDLE",
-  "SHORT_STRANGLE",
-  "SCALP_SELL",
-  "DEBIT_SPREAD",
-  "DIRECTIONAL_BUY",
-];
+const CREDIT_STRATEGIES = new Set<StrategyType>(
+  ALL_STRATEGY_RULES.filter((r) => r.bias === "CREDIT").map((r) => r.key),
+);
 
-const SELLER_STRATEGIES = new Set<StrategyType>([
-  "IRON_CONDOR",
-  "CREDIT_SPREAD",
-  "SHORT_STRADDLE",
-  "SHORT_STRANGLE",
-  "SCALP_SELL",
-]);
-
-// ─── Main Engine ─────────────────────────────
+// ─── Main Engine ────────────────────────────────────────────────────────────
 
 export interface EngineInput {
   indicators: MarketIndicators;
   chainResponse: OptionsChainResponse;
+  technicals: TechnicalSnapshot;
+  professional: ProfessionalIndicatorBundle;
   request: SuggestRequest;
 }
 
 export function generateSuggestions(input: EngineInput): SuggestResponse {
-  const { indicators, chainResponse, request } = input;
-  const chain = chainResponse.chain;
+  const { indicators, chainResponse, technicals, professional, request } = input;
   const spot = chainResponse.spot || indicators.spot;
   const lotSize = request.riskParams.lotSize ?? 75;
   const threshold = request.riskParams.confidenceThreshold ?? 50;
 
-  // Enrich indicators with PCR from chain if missing
   const enrichedIndicators: MarketIndicators = {
     ...indicators,
     pcr: chainResponse.pcr || indicators.pcr,
   };
 
-  // Determine which strategies to evaluate
+  const chainDerived: ChainDerived = {
+    atmStrike: chainResponse.atmStrike,
+    maxCallOI: {
+      strike: chainResponse.maxCallOIStrike,
+      oi:
+        chainResponse.chain.find((s) => s.strike === chainResponse.maxCallOIStrike)
+          ?.ce.oi ?? 0,
+    },
+    maxPutOI: {
+      strike: chainResponse.maxPutOIStrike,
+      oi:
+        chainResponse.chain.find((s) => s.strike === chainResponse.maxPutOIStrike)
+          ?.pe.oi ?? 0,
+    },
+    maxPain: professional.chain?.maxPain ?? computeMaxPain(chainResponse.chain),
+    pcrOI: professional.chain?.pcrOI ?? chainResponse.pcr,
+    pcrVolume: professional.chain?.pcrVolume ?? 0,
+    ivSkewATM: professional.chain?.ivSkewATM ?? 0,
+    atmStraddle: 0,
+    expectedMovePts: 0,
+  };
+
+  const ctx: StrategyEvalContext = {
+    spot,
+    indicators: enrichedIndicators,
+    technicals,
+    professional,
+    chain: chainResponse,
+    chainDerived,
+  };
+
   const strategiesToScan =
     request.strategies && request.strategies.length > 0
       ? request.strategies
@@ -95,24 +103,20 @@ export function generateSuggestions(input: EngineInput): SuggestResponse {
   const suggestions: TradeSuggestion[] = [];
 
   for (const stratType of strategiesToScan) {
-    const checker = STRATEGY_CHECKERS[stratType];
-    if (!checker) continue;
+    const def = STRATEGY_RULES[stratType];
+    if (!def) continue;
 
-    // 1. Check entry conditions
-    const entryCheck = checker.checkEntry(enrichedIndicators);
+    const evalResult = evaluateStrategyRules(def, ctx);
 
-    // 2. Select strikes (may return multiple variations)
     const strikeVariations = selectStrikes(
       stratType,
       spot,
-      chain,
+      chainResponse.chain,
       enrichedIndicators.trend,
       lotSize,
     );
-
     if (strikeVariations.length === 0) continue;
 
-    // 3. Score each variation
     for (const selection of strikeVariations) {
       const sellStrikes = selection.legs
         .filter((l) => l.type.startsWith("SELL"))
@@ -123,38 +127,35 @@ export function generateSuggestions(input: EngineInput): SuggestResponse {
 
       const scoringResult = scoreStrategy({
         strategy: stratType,
-        chain,
+        chain: chainResponse.chain,
         indicators: enrichedIndicators,
         sellStrikes,
         buyStrikes,
         spot,
       });
 
-      // 4. Build suggestion even if entry not ideal
-      //    (let score determine if it's worth showing)
-      const combinedScore = entryCheck.suitable
-        ? scoringResult.score
-        : Math.max(0, scoringResult.score - 15); // penalize unsuitable entries
+      // Combine rule-engine match % with the scoring engine for a richer
+      // confidence score — the rule engine is the floor, the scorer adds
+      // chain + volume colour on top.
+      const blended = Math.round(evalResult.matchPct * 0.55 + scoringResult.score * 0.45);
+      if (blended < threshold) continue;
 
       const tier: ConfidenceTier =
-        combinedScore >= 75 ? "HIGH" : combinedScore >= 55 ? "MEDIUM" : "LOW";
+        blended >= 75 ? "HIGH" : blended >= 55 ? "MEDIUM" : "LOW";
 
-      if (combinedScore < threshold) continue;
-
-      const meta = STRATEGY_META[stratType];
       const rr =
         selection.maxLoss !== 0
           ? Math.round((selection.maxProfit / Math.abs(selection.maxLoss)) * 100) / 100
           : selection.maxProfit > 0
-          ? 99
-          : 0;
+            ? 99
+            : 0;
 
-      const suggestion: TradeSuggestion = {
+      suggestions.push({
         id: generateId(),
         strategy: stratType,
         direction: selection.direction,
         legs: selection.legs,
-        confidence: combinedScore,
+        confidence: blended,
         confidenceTier: tier,
         expectedRiskReward: rr,
         maxProfit: selection.maxProfit,
@@ -162,11 +163,14 @@ export function generateSuggestions(input: EngineInput): SuggestResponse {
         breakeven: selection.breakeven,
         netPremium: selection.netPremium,
         rationale: [
-          ...entryCheck.reasons,
+          evalResult.headline,
+          ...evalResult.rules.filter((r) => r.passed).map((r) => `✓ ${r.detail}`),
           ...scoringResult.reasons,
         ],
-        entryConditions: entryCheck.reasons,
-        exitRules: checker.exitRules as TradeSuggestion["exitRules"],
+        entryConditions: evalResult.rules
+          .filter((r) => r.passed)
+          .map((r) => r.detail),
+        exitRules: def.exitRules,
         marketContext: {
           spot,
           atm: Math.round(spot / 50) * 50,
@@ -176,29 +180,19 @@ export function generateSuggestions(input: EngineInput): SuggestResponse {
           ivPercentile: enrichedIndicators.ivPercentile,
         },
         createdAt: new Date().toISOString(),
-      };
-
-      suggestions.push(suggestion);
+      });
     }
   }
 
-  // Sort: seller strategies first, then by confidence, then by R:R
   suggestions.sort((a, b) => {
-    // Seller vs buyer priority
-    const aIsSeller = SELLER_STRATEGIES.has(a.strategy) ? 1 : 0;
-    const bIsSeller = SELLER_STRATEGIES.has(b.strategy) ? 1 : 0;
-    if (bIsSeller !== aIsSeller) return bIsSeller - aIsSeller;
-
-    // Then by confidence
+    const aCredit = CREDIT_STRATEGIES.has(a.strategy) ? 1 : 0;
+    const bCredit = CREDIT_STRATEGIES.has(b.strategy) ? 1 : 0;
+    if (bCredit !== aCredit) return bCredit - aCredit;
     if (b.confidence !== a.confidence) return b.confidence - a.confidence;
-
-    // Then by net credit (more premium collected = better)
     if (b.netPremium !== a.netPremium) return b.netPremium - a.netPremium;
-
     return 0;
   });
 
-  // Limit to top suggestions (max 3 per strategy, max 12 total)
   const limited = limitSuggestions(suggestions, 3, 12);
 
   return {
@@ -214,10 +208,9 @@ export function generateSuggestions(input: EngineInput): SuggestResponse {
   };
 }
 
-// ─── Helpers ─────────────────────────────────
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
 function generateId(): string {
-  // Simple unique ID without external uuid dependency
   return `ts_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
@@ -228,15 +221,10 @@ function limitSuggestions(
 ): TradeSuggestion[] {
   const counts: Record<string, number> = {};
   const result: TradeSuggestion[] = [];
-
   for (const s of suggestions) {
-    const key = s.strategy;
-    counts[key] = (counts[key] ?? 0) + 1;
-    if (counts[key] <= maxPerStrategy) {
-      result.push(s);
-    }
+    counts[s.strategy] = (counts[s.strategy] ?? 0) + 1;
+    if (counts[s.strategy] <= maxPerStrategy) result.push(s);
     if (result.length >= maxTotal) break;
   }
-
   return result;
 }

@@ -38,7 +38,7 @@ export type ScanTradeType =
   | "SELL_CE"         // naked sell call (bearish)
   | "BULL_PUT_SPREAD" // credit spread (bullish, limited risk)
   | "BEAR_CALL_SPREAD"// credit spread (bearish, limited risk)
-  | "SHORT_STRANGLE"  // sell both sides (neutral)
+  | "SHORT_IRON_FLY"  // sell ATM straddle + buy wings (neutral, limited risk)
   | "IRON_CONDOR"     // sell both spreads (neutral, limited risk)
   | "BUY_CE"          // directional long call
   | "BUY_PE";         // directional long put
@@ -194,8 +194,8 @@ export function runAutoScan(input: AutoScanInput): ScanResult {
     candidates.push(...scanBearCallSpread(strikes, atm, spot, lotSize, ind));
   }
 
-  // E. Short Strangle — premium sell in all trends (OTM straddle income)
-  candidates.push(...scanShortStrangle(strikes, atm, spot, lotSize, ind));
+  // E. Short Iron Fly — sell ATM straddle + buy wings (defined-risk neutral)
+  candidates.push(...scanShortIronFly(strikes, atm, spot, lotSize, ind));
 
   // F. Iron Condor — defined-risk credit; available in all regimes
   candidates.push(...scanIronCondor(strikes, atm, spot, lotSize, ind));
@@ -218,7 +218,7 @@ export function runAutoScan(input: AutoScanInput): ScanResult {
     (t.tradeType === "IRON_CONDOR" ||
       t.tradeType === "BULL_PUT_SPREAD" ||
       t.tradeType === "BEAR_CALL_SPREAD" ||
-      t.tradeType === "SHORT_STRANGLE");
+      t.tradeType === "SHORT_IRON_FLY");
 
   const adjustedRank = (t: ScanTrade): number => {
     if (t.netCredit <= 0) return t.kellyScore;
@@ -559,53 +559,88 @@ function scanBearCallSpread(
   return results;
 }
 
-function scanShortStrangle(
+function scanShortIronFly(
   strikes: OptionChainStrike[], atm: number, spot: number,
   lotSize: number, ind: MarketIndicators,
 ): ScanTrade[] {
   const results: ScanTrade[] = [];
-  for (const width of [100, 150, 200, 250]) {
-    const callStrike = atm + width;
-    const putStrike = atm - width;
-    const call = findStrike(strikes, callStrike);
-    const put = findStrike(strikes, putStrike);
-    if (!call || !put || call.ce.ltp < 3 || put.pe.ltp < 3) continue;
 
-    const credit = call.ce.ltp + put.pe.ltp;
-    const callDelta = Math.abs(call.ce.greeks?.delta ?? 0);
-    const putDelta = Math.abs(put.pe.greeks?.delta ?? 0);
-    // Win prob = both legs expire OTM
-    const winProb = (1 - callDelta) * (1 - putDelta) * 100;
+  const body = findStrike(strikes, atm);
+  if (!body || body.ce.ltp < 3 || body.pe.ltp < 3) return results;
+
+  for (const wingWidth of [100, 150, 200, 250]) {
+    const buyCallStrike = atm + wingWidth;
+    const buyPutStrike = atm - wingWidth;
+    const buyCall = findStrike(strikes, buyCallStrike);
+    const buyPut = findStrike(strikes, buyPutStrike);
+    if (!buyCall || !buyPut) continue;
+
+    const bodyCredit = body.ce.ltp + body.pe.ltp;
+    const wingDebit = buyCall.ce.ltp + buyPut.pe.ltp;
+    const credit = bodyCredit - wingDebit;
+    if (credit <= 2) continue; // wings ate the credit — skip variant
+
+    const maxLossPerShare = wingWidth - credit;
+    if (maxLossPerShare <= 0) continue;
+
+    const maxProfit = credit * lotSize;
+    const maxLoss = maxLossPerShare * lotSize;
+
+    const callDelta = Math.abs(body.ce.greeks?.delta ?? 0.5);
+    const putDelta = Math.abs(body.pe.greeks?.delta ?? 0.5);
+    // Iron Fly profit zone is inside the wings; approximate win prob as
+    // P(|spot at expiry − ATM| < credit) using straddle IV ≈ deltas
+    const winProb = Math.max(
+      0,
+      Math.min(100, (1 - (callDelta + putDelta) / 2) * 100),
+    );
 
     results.push({
       id: genId(),
-      tradeType: "SHORT_STRANGLE",
+      tradeType: "SHORT_IRON_FLY",
       direction: "NEUTRAL",
       legs: [
-        { action: "SELL", optionType: "CE", strike: callStrike, premium: r2(call.ce.ltp),
-          iv: call.ce.iv, delta: callDelta,
-          gamma: call.ce.greeks?.gamma, theta: call.ce.greeks?.theta, vega: call.ce.greeks?.vega,
-          oi: call.ce.oi,
-          changeInOi: call.ce.changeInOi, volume: call.ce.volume,
-          scripCode: scripFromLeg(call.ce) },
-        { action: "SELL", optionType: "PE", strike: putStrike, premium: r2(put.pe.ltp),
-          iv: put.pe.iv, delta: putDelta,
-          gamma: put.pe.greeks?.gamma, theta: put.pe.greeks?.theta, vega: put.pe.greeks?.vega,
-          oi: put.pe.oi,
-          changeInOi: put.pe.changeInOi, volume: put.pe.volume,
-          scripCode: scripFromLeg(put.pe) },
+        { action: "SELL", optionType: "CE", strike: atm, premium: r2(body.ce.ltp),
+          iv: body.ce.iv, delta: callDelta,
+          gamma: body.ce.greeks?.gamma, theta: body.ce.greeks?.theta, vega: body.ce.greeks?.vega,
+          oi: body.ce.oi,
+          changeInOi: body.ce.changeInOi, volume: body.ce.volume,
+          scripCode: scripFromLeg(body.ce) },
+        { action: "BUY", optionType: "CE", strike: buyCallStrike, premium: r2(buyCall.ce.ltp),
+          iv: buyCall.ce.iv, delta: Math.abs(buyCall.ce.greeks?.delta ?? 0),
+          gamma: buyCall.ce.greeks?.gamma, theta: buyCall.ce.greeks?.theta, vega: buyCall.ce.greeks?.vega,
+          oi: buyCall.ce.oi,
+          changeInOi: buyCall.ce.changeInOi, volume: buyCall.ce.volume,
+          scripCode: scripFromLeg(buyCall.ce) },
+        { action: "SELL", optionType: "PE", strike: atm, premium: r2(body.pe.ltp),
+          iv: body.pe.iv, delta: putDelta,
+          gamma: body.pe.greeks?.gamma, theta: body.pe.greeks?.theta, vega: body.pe.greeks?.vega,
+          oi: body.pe.oi,
+          changeInOi: body.pe.changeInOi, volume: body.pe.volume,
+          scripCode: scripFromLeg(body.pe) },
+        { action: "BUY", optionType: "PE", strike: buyPutStrike, premium: r2(buyPut.pe.ltp),
+          iv: buyPut.pe.iv, delta: Math.abs(buyPut.pe.greeks?.delta ?? 0),
+          gamma: buyPut.pe.greeks?.gamma, theta: buyPut.pe.greeks?.theta, vega: buyPut.pe.greeks?.vega,
+          oi: buyPut.pe.oi,
+          changeInOi: buyPut.pe.changeInOi, volume: buyPut.pe.volume,
+          scripCode: scripFromLeg(buyPut.pe) },
       ],
       netCredit: r2(credit),
-      maxProfit: r2(credit * lotSize),
-      maxLoss: r2(credit * 3 * lotSize),
-      breakeven: [r2(putStrike - credit), r2(callStrike + credit)],
-      marginRequired: estimateMargin(spot, credit, "strangle", lotSize),
+      maxProfit: r2(maxProfit),
+      maxLoss: r2(maxLoss),
+      breakeven: [r2(atm - credit), r2(atm + credit)],
+      marginRequired: r2(maxLoss * 1.1),
       winProbability: r2(winProb),
       expectedValue: 0, riskReward: 0, kellyScore: 0, score: 0,
-      edge: "", rationale: [`Short Strangle: Sell ${callStrike}CE + ${putStrike}PE for ₹${r2(credit)} total credit`],
-      warnings: ["⚠️ Unlimited risk on both sides — strict SL mandatory"],
+      edge: "",
+      rationale: [
+        `Short Iron Fly: Sell ${atm}CE/${atm}PE, hedge ${buyCallStrike}CE/${buyPutStrike}PE for ₹${r2(credit)} net credit`,
+      ],
+      warnings: [],
       oiWall: "",
-      thetaDecayPerDay: r2((Math.abs(call.ce.greeks?.theta ?? 0) + Math.abs(put.pe.greeks?.theta ?? 0)) * lotSize),
+      thetaDecayPerDay: r2(
+        (Math.abs(body.ce.greeks?.theta ?? 0) + Math.abs(body.pe.greeks?.theta ?? 0)) * lotSize,
+      ),
       targetTime: "Expiry day",
     });
   }
@@ -1008,16 +1043,13 @@ function findMaxOI(chain: OptionChainStrike[], side: "ce" | "pe"): { strike: num
 }
 
 function estimateMargin(spot: number, premium: number, type: string, lotSize: number): number {
-  // SPAN margin approximation for NIFTY options
-  // Naked sell: ~15-20% of (spot × lotSize) + premium received
-  // Spread: max loss
+  // SPAN margin approximation for NIFTY options.
+  // Naked sell: ~15% of notional. Spread-like: max loss × 1.1.
+  // Buy-side: just the premium paid.
   if (type === "sell") {
     return r2(spot * lotSize * 0.15);
   }
-  if (type === "strangle") {
-    return r2(spot * lotSize * 0.18); // higher for strangle
-  }
-  return r2(premium * lotSize); // buy = premium paid
+  return r2(premium * lotSize);
 }
 
 function emptyScanResult(spot: number, ind: MarketIndicators, tech: TechnicalSnapshot): ScanResult {
