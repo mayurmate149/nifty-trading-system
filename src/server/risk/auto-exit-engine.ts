@@ -30,8 +30,16 @@ import { AutoExitConfig, AutoExitState, RiskSummary } from "@/types/risk";
 import { Position } from "@/types/position";
 import { getPositions, placeOrder, getMargin, computeMarginFromPositions } from "@/server/broker-proxy";
 import { sendNotification, pushEvent } from "@/server/risk/notifier";
-import type { ExitReasonKind } from "@/server/journal/trade-journal-store";
+import type {
+  ExitReasonKind,
+  JournalAggregatedGreeks,
+  JournalGreeks,
+  JournalMarketContext,
+  JournalPositionSnapshot,
+} from "@/server/journal/trade-journal-store";
 import { insertPortfolioExit } from "@/server/journal/trade-journal-store";
+import { computeGreeksExposure } from "@/server/market-data/analytics";
+import { fetchLiveSpotData, fetchMarketSnapshot } from "@/server/market-data/rest";
 
 // ─── Persist state across Next.js HMR (dev) ─────
 // All state lives on globalThis so it survives module hot-reloads
@@ -70,6 +78,11 @@ const DEFAULT_CONFIG: AutoExitConfig = {
 
 function getConfig(): AutoExitConfig {
   return g.__autoExitConfig ?? DEFAULT_CONFIG;
+}
+
+function round4(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  return Math.round(n * 10000) / 10000;
 }
 
 // ─── Watch Management ────────────────────────
@@ -363,15 +376,89 @@ async function executeExitAll(
 
   g.__exitingAll = true;
 
-  const legsAtExitSnapshot =
-    positions.map((p) => ({
+  // ─── Capture rich exit context (Greeks + market) before placing orders ──
+  const exposure = computeGreeksExposure(positions); // estimates Greeks when chain not provided
+  const greeksByPositionId = new Map<string, { delta: number; gamma: number; theta: number; vega: number }>();
+  for (const r of exposure.perPosition) {
+    greeksByPositionId.set(r.positionId, {
+      delta: r.delta,
+      gamma: r.gamma,
+      theta: r.theta,
+      vega: r.vega,
+    });
+  }
+
+  const legsAtExitSnapshot: JournalPositionSnapshot[] = positions.map((p) => {
+    const scaled = greeksByPositionId.get(p.positionId);
+    const qtyAbs = Math.abs(p.quantity) || 1;
+    // Reverse the scaling done in `computeGreeksExposure` to get per-share Greeks.
+    const perShare: JournalGreeks | undefined = scaled
+      ? {
+          delta: round4(scaled.delta / (p.quantity || 1)),
+          gamma: round4(scaled.gamma / qtyAbs),
+          theta: round4(scaled.theta / qtyAbs),
+          vega: round4(scaled.vega / qtyAbs),
+        }
+      : undefined;
+    return {
       scripCode: parseInt(p.positionId, 10) || 0,
       symbol: p.symbol,
+      strike: p.strike,
+      optionType: p.optionType === "CALL" ? "CE" : "PE",
       quantity: p.quantity,
       avgPrice: p.avgPrice,
       ltp: p.ltp,
       mtmRupee: p.pl,
-    }));
+      exposureRupees: Math.round(p.avgPrice * qtyAbs * 100) / 100,
+      greeks: perShare,
+      scaledGreeks: scaled
+        ? {
+            delta: round4(scaled.delta),
+            gamma: round4(scaled.gamma),
+            theta: round4(scaled.theta),
+            vega: round4(scaled.vega),
+          }
+        : undefined,
+    };
+  });
+
+  const aggregatedGreeks: JournalAggregatedGreeks = {
+    netDelta: round4(exposure.totalDelta),
+    netGamma: round4(exposure.totalGamma),
+    netTheta: round4(exposure.totalTheta),
+    netVega: round4(exposure.totalVega),
+  };
+
+  // ─── Best-effort market snapshot at exit ──
+  let exitMarketContext: JournalMarketContext | null = null;
+  try {
+    const snap = await fetchMarketSnapshot();
+    let live: { nifty: number; vix: number; bankNifty: number; niftyPrevClose?: number } | null = null;
+    try {
+      live = await fetchLiveSpotData(creds.accessToken);
+    } catch {
+      // live spot is best-effort
+    }
+    const spot = live?.nifty || snap.nifty;
+    const prev = live?.niftyPrevClose || snap.niftyPrevClose || spot;
+    const spotChange = Math.round((spot - prev) * 100) / 100;
+    const spotChangePct = prev > 0 ? Math.round((spotChange / prev) * 10000) / 100 : 0;
+    exitMarketContext = {
+      spot,
+      spotChange,
+      spotChangePct,
+      vix: live?.vix ?? snap.vix,
+      daysToExpiry: snap.daysToExpiry,
+      expiry: snap.expiry,
+      source: "indicators",
+      asOf: new Date(),
+    };
+  } catch (e) {
+    console.warn(
+      "[AUTO-EXIT] Could not capture exit market context:",
+      e instanceof Error ? e.message : e,
+    );
+  }
 
   let succeeded = 0;
   let failed = 0;
@@ -478,6 +565,10 @@ async function executeExitAll(
     succeeded = results.filter((r) => r.success).length;
     failed = results.filter((r) => !r.success).length;
 
+    // Map ScripCode → leg snapshot so we can carry strike/optionType into exit-order rows.
+    const legByScrip = new Map<number, JournalPositionSnapshot>();
+    for (const leg of legsAtExitSnapshot) legByScrip.set(leg.scripCode, leg);
+
     await insertPortfolioExit({
       clientCode: creds.clientCode,
       source: exitSource,
@@ -486,17 +577,25 @@ async function executeExitAll(
       pnlRupees: totalPnl,
       capitalAtSnapshot,
       legsAtExit: legsAtExitSnapshot,
-      exitOrders: results.map((r) => ({
-        scripCode: r.scripCode,
-        symbol: r.symbol,
-        buySell: r.buySell,
-        quantity: r.quantity,
-        limitPrice: r.limitPrice,
-        orderId: r.orderId,
-        ok: !!r.success,
-        error: "error" in r ? r.error : undefined,
-        mtmRupeeBeforeExit: r.mtmRupeeBeforeExit,
-      })),
+      exitOrders: results.map((r) => {
+        const leg = legByScrip.get(r.scripCode);
+        return {
+          scripCode: r.scripCode,
+          symbol: r.symbol,
+          strike: leg?.strike,
+          optionType: leg?.optionType,
+          buySell: r.buySell,
+          quantity: r.quantity,
+          limitPrice: r.limitPrice,
+          ltpAtExit: leg?.ltp,
+          orderId: r.orderId,
+          ok: !!r.success,
+          error: "error" in r ? r.error : undefined,
+          mtmRupeeBeforeExit: r.mtmRupeeBeforeExit,
+        };
+      }),
+      marketContext: exitMarketContext,
+      aggregatedGreeks,
     }).catch((e) =>
       console.error("[JOURNAL] Failed to persist portfolio exit:", e instanceof Error ? e.message : e),
     );

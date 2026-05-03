@@ -19,6 +19,9 @@ interface ScanLeg {
   premium: number;
   iv: number;
   delta: number;
+  gamma?: number;
+  theta?: number;
+  vega?: number;
   oi: number;
   changeInOi: number;
   volume: number;
@@ -575,14 +578,26 @@ export default function AutoScannerPage() {
           </p>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {data.topCreditStrategies.map((t) => (
-              <CreditStrategyCard key={t.id} trade={t} lotQty={NIFTY_OPTION_LOT} />
+              <CreditStrategyCard
+                key={t.id}
+                trade={t}
+                lotQty={NIFTY_OPTION_LOT}
+                marketContext={ctx}
+              />
             ))}
           </div>
         </div>
       )}
 
       {/* ─── Best Trade Card ─────────────────── */}
-      {best && <BestTradeCard trade={best} capital={capital} lotQty={NIFTY_OPTION_LOT} />}
+      {best && (
+        <BestTradeCard
+          trade={best}
+          capital={capital}
+          lotQty={NIFTY_OPTION_LOT}
+          marketContext={ctx}
+        />
+      )}
 
       {/* ─── Alternates ──────────────────────── */}
       {data?.alternates && data.alternates.length > 0 && (
@@ -591,7 +606,12 @@ export default function AutoScannerPage() {
           <p className="mb-3 text-xs text-slate-500">Same scan; runner-up structures.</p>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {data.alternates.map((trade) => (
-              <AlternateCard key={trade.id} trade={trade} lotQty={NIFTY_OPTION_LOT} />
+              <AlternateCard
+                key={trade.id}
+                trade={trade}
+                lotQty={NIFTY_OPTION_LOT}
+                marketContext={ctx}
+              />
             ))}
           </div>
         </div>
@@ -649,7 +669,17 @@ export default function AutoScannerPage() {
 
 // ─── Best Trade Card ────────────────────────
 
-function BestTradeCard({ trade, capital, lotQty }: { trade: ScanTrade; capital: number; lotQty: number }) {
+function BestTradeCard({
+  trade,
+  capital,
+  lotQty,
+  marketContext,
+}: {
+  trade: ScanTrade;
+  capital: number;
+  lotQty: number;
+  marketContext?: ScanResult["marketContext"];
+}) {
   const tt = TRADE_TYPE_LABELS[trade.tradeType] || { icon: "?", label: trade.tradeType, color: "text-gray-400" };
   const evPositive = trade.expectedValue >= 0;
   const target2Pct = capital * 0.02;
@@ -687,7 +717,12 @@ function BestTradeCard({ trade, capital, lotQty }: { trade: ScanTrade; capital: 
               Credit / selling
             </span>
           )}
-          <EnterPositionButton trade={trade} lotQty={lotQty} label={`Enter in broker (1 lot × ${lotQty})`} />
+          <EnterPositionButton
+            trade={trade}
+            lotQty={lotQty}
+            label={`Enter in broker (1 lot × ${lotQty})`}
+            marketContext={marketContext}
+          />
         </div>
       </div>
 
@@ -800,7 +835,15 @@ function BestTradeCard({ trade, capital, lotQty }: { trade: ScanTrade; capital: 
 
 // ─── Alternate Trade Card ───────────────────
 
-function CreditStrategyCard({ trade, lotQty }: { trade: ScanTrade; lotQty: number }) {
+function CreditStrategyCard({
+  trade,
+  lotQty,
+  marketContext,
+}: {
+  trade: ScanTrade;
+  lotQty: number;
+  marketContext?: ScanResult["marketContext"];
+}) {
   const tt = TRADE_TYPE_LABELS[trade.tradeType] || { icon: "?", label: trade.tradeType, color: "text-gray-400" };
   return (
     <div className="rounded-xl border border-amber-800/40 bg-amber-950/15 p-4 shadow-sm">
@@ -820,7 +863,13 @@ function CreditStrategyCard({ trade, lotQty }: { trade: ScanTrade; lotQty: numbe
           </div>
         ))}
       </div>
-      <EnterPositionButton trade={trade} lotQty={lotQty} className="w-full text-sm" label="Enter this structure" />
+      <EnterPositionButton
+        trade={trade}
+        lotQty={lotQty}
+        className="w-full text-sm"
+        label="Enter this structure"
+        marketContext={marketContext}
+      />
     </div>
   );
 }
@@ -830,11 +879,13 @@ function EnterPositionButton({
   lotQty,
   label,
   className = "",
+  marketContext,
 }: {
   trade: ScanTrade;
   lotQty: number;
   label: string;
   className?: string;
+  marketContext?: ScanResult["marketContext"];
 }) {
   const [busy, setBusy] = useState(false);
   const missingScrip = trade.legs.some((l) => !l.scripCode);
@@ -857,6 +908,16 @@ function EnterPositionButton({
               premium: l.premium,
               strike: l.strike,
               optionType: l.optionType,
+              greeks: {
+                delta: l.delta,
+                gamma: l.gamma,
+                theta: l.theta,
+                vega: l.vega,
+                iv: l.iv,
+              },
+              oi: l.oi,
+              changeInOi: l.changeInOi,
+              volume: l.volume,
             })),
             lotQty,
             {
@@ -865,7 +926,36 @@ function EnterPositionButton({
               direction: trade.direction,
               edge: trade.edge,
               rationale: trade.rationale,
+              metrics: {
+                netCredit: trade.netCredit,
+                maxProfit: trade.maxProfit,
+                maxLoss: trade.maxLoss,
+                riskReward: trade.riskReward,
+                marginRequired: trade.marginRequired,
+                winProbability: trade.winProbability,
+                expectedValue: trade.expectedValue,
+                kellyScore: trade.kellyScore,
+                thetaDecayPerDay: trade.thetaDecayPerDay,
+                score: trade.score,
+                breakeven: trade.breakeven,
+                oiWall: trade.oiWall,
+                targetTime: trade.targetTime,
+                warnings: trade.warnings,
+              },
             },
+            marketContext
+              ? {
+                  spot: marketContext.spot,
+                  spotChange: marketContext.spotChange,
+                  spotChangePct: marketContext.spotChangePct,
+                  vix: marketContext.vix,
+                  pcr: marketContext.pcr,
+                  trend: marketContext.trend,
+                  trendStrength: marketContext.trendStrength,
+                  ivPercentile: marketContext.ivPercentile,
+                  daysToExpiry: marketContext.daysToExpiry,
+                }
+              : undefined,
           );
           if (r.allOk) {
             window.alert(
@@ -890,7 +980,15 @@ function EnterPositionButton({
   );
 }
 
-function AlternateCard({ trade, lotQty }: { trade: ScanTrade; lotQty: number }) {
+function AlternateCard({
+  trade,
+  lotQty,
+  marketContext,
+}: {
+  trade: ScanTrade;
+  lotQty: number;
+  marketContext?: ScanResult["marketContext"];
+}) {
   const tt = TRADE_TYPE_LABELS[trade.tradeType] || { icon: "?", label: trade.tradeType, color: "text-gray-400" };
 
   return (
@@ -937,7 +1035,13 @@ function AlternateCard({ trade, lotQty }: { trade: ScanTrade; lotQty: number }) 
 
       <p className="mt-2 truncate text-xs text-gray-500">{trade.edge}</p>
       <div className="mt-3">
-        <EnterPositionButton trade={trade} lotQty={lotQty} className="w-full text-xs" label="Enter in broker" />
+        <EnterPositionButton
+          trade={trade}
+          lotQty={lotQty}
+          className="w-full text-xs"
+          label="Enter in broker"
+          marketContext={marketContext}
+        />
       </div>
     </div>
   );

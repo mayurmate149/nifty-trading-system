@@ -3,22 +3,49 @@ import { withAuth } from "@/server/middleware/auth";
 import { placeOrder } from "@/server/broker-proxy";
 import {
   insertOpenEntryFromExecuteScan,
+  type JournalEntryLegRow,
+  type JournalGreeks,
+  type JournalMarketContext,
   type JournalStrategyContext,
 } from "@/server/journal/trade-journal-store";
 
 const DEFAULT_NIFTY_LOT = 75;
 
+type ExecuteScanLeg = {
+  action: "BUY" | "SELL";
+  scripCode?: number;
+  premium: number;
+  strike?: number;
+  optionType?: "CE" | "PE";
+  greeks?: {
+    delta?: number;
+    gamma?: number;
+    theta?: number;
+    vega?: number;
+    iv?: number;
+  };
+  oi?: number;
+  changeInOi?: number;
+  volume?: number;
+};
+
 type ExecuteScanBody = {
-  legs?: Array<{
-    action: "BUY" | "SELL";
-    scripCode?: number;
-    premium: number;
-    strike?: number;
-    optionType?: "CE" | "PE";
-  }>;
+  legs?: ExecuteScanLeg[];
   quantity?: number;
   strategy?: JournalStrategyContext | null;
+  marketContext?: JournalMarketContext | null;
 };
+
+function safeGreeks(g?: ExecuteScanLeg["greeks"]): JournalGreeks | undefined {
+  if (!g) return undefined;
+  const out: JournalGreeks = {};
+  if (typeof g.delta === "number") out.delta = g.delta;
+  if (typeof g.gamma === "number") out.gamma = g.gamma;
+  if (typeof g.theta === "number") out.theta = g.theta;
+  if (typeof g.vega === "number") out.vega = g.vega;
+  if (typeof g.iv === "number") out.iv = g.iv;
+  return Object.keys(out).length ? out : undefined;
+}
 
 /**
  * POST /api/v1/trading/execute-scan
@@ -35,6 +62,9 @@ export async function POST(request: NextRequest) {
           ? body.quantity
           : DEFAULT_NIFTY_LOT;
       const strategy = body.strategy ?? null;
+      const marketContext: JournalMarketContext | null = body.marketContext
+        ? { ...body.marketContext, source: body.marketContext.source ?? "scan", asOf: new Date() }
+        : null;
 
       if (!Array.isArray(legs) || legs.length === 0) {
         return NextResponse.json({ error: "legs array required" }, { status: 400 });
@@ -106,17 +136,28 @@ export async function POST(request: NextRequest) {
 
       const allOk = results.every((r) => r.ok);
 
-      const journalEntryLegs = results.map((r, i) => {
+      const journalEntryLegs: JournalEntryLegRow[] = results.map((r, i) => {
         const leg = sorted[i];
+        const action: "BUY" | "SELL" =
+          leg?.action ?? (r.buySell === "B" ? "BUY" : "SELL");
+        const sideSign = action === "BUY" ? -1 : 1; // SELL collects, BUY pays
+        const legPremiumRupees = r.ok
+          ? Math.round(sideSign * r.price * quantity * 100) / 100
+          : 0;
         return {
           scripCode: r.scripCode || leg?.scripCode || 0,
-          action:
-            leg?.action ??
-            ((r.buySell === "B" ? "BUY" : "SELL") as "BUY" | "SELL"),
+          action,
           quantity,
           limitPrice: r.price,
+          premiumLtp: typeof leg?.premium === "number" ? leg.premium : undefined,
           strike: leg?.strike,
           optionType: leg?.optionType,
+          greeks: safeGreeks(leg?.greeks),
+          oi: typeof leg?.oi === "number" ? leg.oi : undefined,
+          changeInOi:
+            typeof leg?.changeInOi === "number" ? leg.changeInOi : undefined,
+          volume: typeof leg?.volume === "number" ? leg.volume : undefined,
+          legPremiumRupees,
           orderId: r.orderId,
           ok: r.ok,
           error: r.error,
@@ -129,6 +170,7 @@ export async function POST(request: NextRequest) {
           clientCode: session.clientCode,
           quantityLot: quantity,
           strategy,
+          marketContext,
           entryLegs: journalEntryLegs,
           allEntryOrdersOk: allOk,
         });

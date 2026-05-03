@@ -76,6 +76,16 @@ export const api = {
         premium: number;
         strike?: number;
         optionType?: "CE" | "PE";
+        greeks?: {
+          delta?: number;
+          gamma?: number;
+          theta?: number;
+          vega?: number;
+          iv?: number;
+        };
+        oi?: number;
+        changeInOi?: number;
+        volume?: number;
       }>,
       quantity?: number,
       strategy?: {
@@ -84,6 +94,34 @@ export const api = {
         direction?: string;
         edge?: string;
         rationale?: string[];
+        metrics?: {
+          netCredit?: number;
+          maxProfit?: number;
+          maxLoss?: number;
+          riskReward?: number;
+          marginRequired?: number;
+          winProbability?: number;
+          expectedValue?: number;
+          kellyScore?: number;
+          thetaDecayPerDay?: number;
+          score?: number;
+          breakeven?: number[];
+          oiWall?: string;
+          targetTime?: string;
+          warnings?: string[];
+        };
+      } | null,
+      marketContext?: {
+        spot?: number;
+        spotChange?: number;
+        spotChangePct?: number;
+        vix?: number;
+        pcr?: number;
+        trend?: string;
+        trendStrength?: number;
+        ivPercentile?: number;
+        daysToExpiry?: number;
+        expiry?: string;
       } | null,
     ) =>
       apiFetch<{
@@ -98,7 +136,7 @@ export const api = {
         journalOpenId?: string | null;
       }>("/trading/execute-scan", {
         method: "POST",
-        body: JSON.stringify({ legs, quantity, strategy }),
+        body: JSON.stringify({ legs, quantity, strategy, marketContext }),
       }),
   },
 
@@ -109,7 +147,7 @@ export const api = {
         message?: string;
         records: any[];
       }>(`/journal${limit ? `?limit=${limit}` : ""}`),
-    pnl: (period: "week" | "month" | "year") =>
+    pnl: (period: "day" | "week" | "month" | "year") =>
       apiFetch<{
         mongoConfigured?: boolean;
         period: string;
@@ -121,7 +159,29 @@ export const api = {
           avgPnlRupees: number;
           wins: number;
           losses: number;
+          winRatePct: number;
+          avgWin: number;
+          avgLoss: number;
+          profitFactor: number | null;
+          bestTrade: number;
+          worstTrade: number;
+          expectancy: number;
+          avgHoldingMin: number | null;
         }>;
+        overall?: {
+          totalPnlRupees: number;
+          tradeCount: number;
+          wins: number;
+          losses: number;
+          winRatePct: number;
+          avgWin: number;
+          avgLoss: number;
+          profitFactor: number | null;
+          bestTrade: number;
+          worstTrade: number;
+          expectancy: number;
+          avgHoldingMin: number | null;
+        };
       }>(`/journal/pnl?period=${period}`),
   },
 

@@ -7,7 +7,7 @@ import {
 import { isMongoConfigured } from "@/server/db/mongo-client";
 
 function parsePeriod(v: string | null): PnlPeriod {
-  if (v === "week" || v === "month" || v === "year") return v;
+  if (v === "day" || v === "week" || v === "month" || v === "year") return v;
   return "month";
 }
 
@@ -29,19 +29,19 @@ export async function GET(request: NextRequest) {
       }
 
       const q = request.nextUrl.searchParams.get("period");
-      if (q != null && q !== "week" && q !== "month" && q !== "year") {
+      if (q != null && q !== "day" && q !== "week" && q !== "month" && q !== "year") {
         return NextResponse.json(
-          { error: "period must be week, month, or year" },
+          { error: "period must be day, week, month, or year" },
           { status: 400 },
         );
       }
       const period = parsePeriod(q);
 
-      const { buckets, mongoConfigured } = await summarizePnlByPeriod(
+      const { buckets, overall, mongoConfigured } = await summarizePnlByPeriod(
         session.clientCode,
         period,
       );
-      return NextResponse.json({ mongoConfigured, period, buckets });
+      return NextResponse.json({ mongoConfigured, period, buckets, overall });
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "journal pnl failed";
       console.error("[JOURNAL] GET /journal/pnl failed:", msg);
