@@ -147,6 +147,11 @@ export const api = {
         message?: string;
         records: any[];
       }>(`/journal${limit ? `?limit=${limit}` : ""}`),
+    remove: (id: string) =>
+      apiFetch<{ ok: boolean; id?: string; deleted?: number; message?: string }>(
+        `/journal/${encodeURIComponent(id)}`,
+        { method: "DELETE" },
+      ),
     pnl: (period: "day" | "week" | "month" | "year") =>
       apiFetch<{
         mongoConfigured?: boolean;

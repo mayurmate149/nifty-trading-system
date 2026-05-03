@@ -7,7 +7,7 @@
  */
 
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 
 type TabKey = "activity" | "pnl";
@@ -221,6 +221,34 @@ function ActivityLog({
   records: Array<Record<string, unknown>>;
   loading: boolean;
 }) {
+  const queryClient = useQueryClient();
+  const [pendingId, setPendingId] = useState<string | null>(null);
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => api.journal.remove(id),
+    onMutate: (id) => setPendingId(id),
+    onSettled: () => setPendingId(null),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["journal"] });
+      queryClient.invalidateQueries({ queryKey: ["journal-pnl"] });
+    },
+    onError: (err) => {
+      window.alert(err instanceof Error ? err.message : "Delete failed");
+    },
+  });
+
+  const handleDelete = (id: string, summary: string) => {
+    if (!id) return;
+    if (
+      !window.confirm(
+        `Delete this journal entry?\n\n${summary}\n\nThis cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    deleteMutation.mutate(id);
+  };
+
   if (loading) {
     return (
       <div className="rounded-xl border border-gray-800 bg-gray-900/40 px-4 py-8 text-center text-sm text-gray-500">
@@ -240,11 +268,12 @@ function ActivityLog({
     <div className="space-y-3">
       {records.map((row) => {
         const id = String(row.id ?? row._id ?? Math.random());
+        const isDeleting = pendingId === id;
         if (row.recordType === "OPEN_ENTRY") {
-          return <EntryRow key={id} row={row} />;
+          return <EntryRow key={id} row={row} onDelete={handleDelete} isDeleting={isDeleting} />;
         }
         if (row.recordType === "PORTFOLIO_EXIT") {
-          return <ExitRow key={id} row={row} />;
+          return <ExitRow key={id} row={row} onDelete={handleDelete} isDeleting={isDeleting} />;
         }
         return null;
       })}
@@ -252,9 +281,43 @@ function ActivityLog({
   );
 }
 
+function DeleteButton({
+  onClick,
+  isDeleting,
+  size = "sm",
+}: {
+  onClick: (e: React.MouseEvent) => void;
+  isDeleting: boolean;
+  size?: "sm" | "xs";
+}) {
+  const sizing = size === "xs" ? "px-2 py-0.5 text-[10px]" : "px-2.5 py-1 text-[11px]";
+  return (
+    <button
+      type="button"
+      disabled={isDeleting}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick(e);
+      }}
+      className={`rounded-md border border-rose-800/50 bg-rose-950/30 font-semibold uppercase tracking-wide text-rose-300 transition hover:border-rose-700 hover:bg-rose-900/40 hover:text-rose-200 disabled:cursor-not-allowed disabled:opacity-50 ${sizing}`}
+      title="Delete this journal record"
+    >
+      {isDeleting ? "Deleting…" : "Delete"}
+    </button>
+  );
+}
+
 // ─── Entry row ────────────────────────────────
 
-function EntryRow({ row }: { row: Record<string, unknown> }) {
+function EntryRow({
+  row,
+  onDelete,
+  isDeleting,
+}: {
+  row: Record<string, unknown>;
+  onDelete: (id: string, summary: string) => void;
+  isDeleting: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const legs = (row.entryLegs as Array<Record<string, unknown>>) ?? [];
   const strat = (row.strategy as Record<string, unknown> | null) ?? null;
@@ -264,18 +327,28 @@ function EntryRow({ row }: { row: Record<string, unknown> }) {
   const allOk = Boolean(row.allEntryOrdersOk);
   const netPremium = Number(row.netPremiumRupees ?? 0);
   const opened = (row.openedAt as string) ?? (row.createdAt as string);
+  const recordId = String(row.id ?? "");
 
   const tradeType = (strat?.tradeType as string | undefined) ?? "Execute-scan";
   const direction = (strat?.direction as string | undefined) ?? null;
   const edge = (strat?.edge as string | undefined) ?? null;
   const rationale = (strat?.rationale as string[] | undefined) ?? [];
 
+  const summary = `${tradeType}${direction ? ` · ${direction}` : ""} · ${legs.length} leg(s) @ ${istDateTime(opened)}`;
+
   return (
     <div className="overflow-hidden rounded-xl border border-violet-800/30 bg-gray-900/40 transition hover:border-violet-700/50">
-      <button
-        type="button"
-        className="flex w-full flex-wrap items-start justify-between gap-3 px-4 py-3 text-left"
+      <div
+        role="button"
+        tabIndex={0}
+        className="flex w-full cursor-pointer flex-wrap items-start justify-between gap-3 px-4 py-3 text-left"
         onClick={() => setOpen((v) => !v)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setOpen((v) => !v);
+          }
+        }}
       >
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <div className="flex flex-wrap items-center gap-2">
@@ -312,8 +385,16 @@ function EntryRow({ row }: { row: Record<string, unknown> }) {
             ) : null}
           </div>
         </div>
-        <div className="text-xs text-gray-500">{open ? "Hide ▴" : "Details ▾"}</div>
-      </button>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-500">{open ? "Hide ▴" : "Details ▾"}</span>
+          {recordId ? (
+            <DeleteButton
+              isDeleting={isDeleting}
+              onClick={() => onDelete(recordId, summary)}
+            />
+          ) : null}
+        </div>
+      </div>
 
       {open ? (
         <div className="border-t border-gray-800 bg-gray-950/40 px-4 py-4">
@@ -448,7 +529,15 @@ function EntryLegsTable({ legs }: { legs: Array<Record<string, unknown>> }) {
 
 // ─── Exit row ─────────────────────────────────
 
-function ExitRow({ row }: { row: Record<string, unknown> }) {
+function ExitRow({
+  row,
+  onDelete,
+  isDeleting,
+}: {
+  row: Record<string, unknown>;
+  onDelete: (id: string, summary: string) => void;
+  isDeleting: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const pnl = Number(row.pnlRupees ?? 0);
   const pct = Number(row.portfolioPnlPct ?? 0);
@@ -463,17 +552,27 @@ function ExitRow({ row }: { row: Record<string, unknown> }) {
   const agg = (row.aggregatedGreeks as Record<string, unknown> | undefined) ?? undefined;
   const holdMs = Number(row.holdingDurationMs ?? 0) || null;
   const reasonLabel = reason.replace(/_/g, " ");
+  const recordId = String(row.id ?? "");
 
   const win = pnl >= 0;
   const tone = win ? "border-emerald-800/40 bg-emerald-950/10 hover:border-emerald-700/60"
                    : "border-rose-800/40 bg-rose-950/10 hover:border-rose-700/60";
 
+  const summary = `EXIT · ${reasonLabel} · P&L ${formatInr(pnl, true)} (${pct >= 0 ? "+" : ""}${formatNum(pct, 2)}%) @ ${istDateTime(closed)}`;
+
   return (
     <div className={`overflow-hidden rounded-xl border ${tone} transition`}>
-      <button
-        type="button"
-        className="flex w-full flex-wrap items-start justify-between gap-3 px-4 py-3 text-left"
+      <div
+        role="button"
+        tabIndex={0}
+        className="flex w-full cursor-pointer flex-wrap items-start justify-between gap-3 px-4 py-3 text-left"
         onClick={() => setOpen((v) => !v)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setOpen((v) => !v);
+          }
+        }}
       >
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <div className="flex flex-wrap items-center gap-2">
@@ -490,14 +589,22 @@ function ExitRow({ row }: { row: Record<string, unknown> }) {
             ) : null}
           </div>
         </div>
-        <div className="flex flex-col items-end gap-0.5">
+        <div className="flex flex-col items-end gap-1">
           <PnlValue value={pnl} size="lg" withDecimals />
           <span className={`font-mono text-xs ${pct >= 0 ? "text-emerald-400/90" : "text-rose-400/90"}`}>
             {pct >= 0 ? "+" : ""}{formatNum(pct, 2)}%
           </span>
-          <span className="text-[11px] text-gray-500">{open ? "Hide ▴" : "Details ▾"}</span>
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-gray-500">{open ? "Hide ▴" : "Details ▾"}</span>
+            {recordId ? (
+              <DeleteButton
+                isDeleting={isDeleting}
+                onClick={() => onDelete(recordId, summary)}
+              />
+            ) : null}
+          </div>
         </div>
-      </button>
+      </div>
 
       {open ? (
         <div className="border-t border-gray-800 bg-gray-950/40 px-4 py-4">

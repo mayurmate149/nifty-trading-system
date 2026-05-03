@@ -1,4 +1,4 @@
-import type { ObjectId } from "mongodb";
+import { ObjectId } from "mongodb";
 import { getMongoDb, isMongoConfigured } from "@/server/db/mongo-client";
 
 export const TRADE_JOURNAL_COLLECTION = "trade_journal";
@@ -478,6 +478,36 @@ export async function listJournalForClient(
     records: rows as unknown as TradeJournalRecord[],
     mongoConfigured: true,
   };
+}
+
+export type JournalDeleteResult =
+  | { ok: true; deleted: 1; mongoConfigured: true }
+  | { ok: false; deleted: 0; mongoConfigured: boolean; reason: "not-configured" | "invalid-id" | "not-found" };
+
+/**
+ * Delete a single journal record (entry or exit) owned by `clientCode`.
+ * Authorization is enforced at the query level — we always include `clientCode`
+ * so a user can only delete their own rows even if they pass another user's `_id`.
+ */
+export async function deleteJournalRecord(
+  clientCode: string,
+  recordId: string,
+): Promise<JournalDeleteResult> {
+  if (!isMongoConfigured()) {
+    return { ok: false, deleted: 0, mongoConfigured: false, reason: "not-configured" };
+  }
+  if (!recordId || !ObjectId.isValid(recordId)) {
+    return { ok: false, deleted: 0, mongoConfigured: true, reason: "invalid-id" };
+  }
+  const db = await getMongoDb();
+  const r = await db.collection(TRADE_JOURNAL_COLLECTION).deleteOne({
+    _id: new ObjectId(recordId),
+    clientCode,
+  });
+  if (r.deletedCount !== 1) {
+    return { ok: false, deleted: 0, mongoConfigured: true, reason: "not-found" };
+  }
+  return { ok: true, deleted: 1, mongoConfigured: true };
 }
 
 function round2(n: number): number {
