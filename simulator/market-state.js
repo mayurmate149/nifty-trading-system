@@ -259,11 +259,13 @@ function broadcastWS(message) {
 function simulatePlaceOrder(body) {
   const orderId = generateOrderId();
   const spot = state.nifty.price;
+  /** Normalize types so netting matches stored positions (avoids dup legs on exit). */
+  const scripCode = Number(body.ScripCode);
 
   const order = {
     ExchOrderID: orderId,
-    ScripCode: body.ScripCode,
-    ScripName: `NIFTY OPT ${body.ScripCode}`,
+    ScripCode: scripCode,
+    ScripName: `NIFTY OPT ${scripCode}`,
     BuySell: body.BuySell,
     Qty: body.Qty,
     Rate: body.Price || spot,
@@ -278,14 +280,12 @@ function simulatePlaceOrder(body) {
 
   // Find existing position by ScripCode (regardless of side)
   // An exit order is the OPPOSITE side of the open position
-  const existingIdx = state.positions.findIndex(
-    (p) => p.ScripCode === body.ScripCode
-  );
+  const existingIdx = state.positions.findIndex((p) => Number(p.ScripCode) === scripCode);
 
   if (existingIdx >= 0) {
     const existing = state.positions[existingIdx];
     // BUY adds to NetQty, SELL subtracts from NetQty
-    const orderQty = body.BuySell === "B" ? body.Qty : -body.Qty;
+    const orderQty = Number(body.Qty ?? 0) * (body.BuySell === "B" ? 1 : -1);
     existing.NetQty = existing.NetQty + orderQty;
 
     console.log(
@@ -300,13 +300,13 @@ function simulatePlaceOrder(body) {
   } else {
     // New position
     state.positions.push({
-      ScripCode: body.ScripCode,
+      ScripCode: scripCode,
       ScripName: order.ScripName,
       Symbol: "NIFTY",
       OptionType: "CE",
       StrikeRate: 0,
       BuySell: body.BuySell,
-      NetQty: body.BuySell === "B" ? body.Qty : -body.Qty,
+      NetQty: body.BuySell === "B" ? Number(body.Qty) || 0 : -(Number(body.Qty) || 0),
       AvgRate: order.Rate,
       LTP: order.Rate,
       MTOM: 0,
@@ -316,7 +316,8 @@ function simulatePlaceOrder(body) {
 
   // Update margin
   if (body.BuySell === "S") {
-    const marginHit = body.Qty * (body.Price || spot) * 5;
+    const qty = Number(body.Qty) || 0;
+    const marginHit = qty * (body.Price || spot) * 5;
     state.margin.UsedMargin = roundTo(state.margin.UsedMargin + marginHit, 2);
     state.margin.AvailableMargin = roundTo(
       state.margin.NetMargin - state.margin.UsedMargin,

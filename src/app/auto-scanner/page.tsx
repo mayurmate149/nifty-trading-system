@@ -855,8 +855,17 @@ function EnterPositionButton({
               action: l.action,
               scripCode: l.scripCode,
               premium: l.premium,
+              strike: l.strike,
+              optionType: l.optionType,
             })),
             lotQty,
+            {
+              scanTradeId: trade.id,
+              tradeType: trade.tradeType,
+              direction: trade.direction,
+              edge: trade.edge,
+              rationale: trade.rationale,
+            },
           );
           if (r.allOk) {
             window.alert(

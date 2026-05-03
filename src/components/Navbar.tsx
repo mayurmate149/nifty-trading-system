@@ -6,6 +6,7 @@ import { useAuth } from "@/app/providers/AuthProvider";
 
 const NAV_ITEMS = [
   { href: "/dashboard", label: "🏠 Dashboard" },
+  { href: "/journal", label: "📓 Journal" },
   { href: "/positions", label: "📊 Positions" },
   { href: "/option-chain-live", label: "📡 Option Chain" },
   { href: "/auto-scanner", label: "📊 Pro Desk" },

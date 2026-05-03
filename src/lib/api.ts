@@ -69,7 +69,23 @@ export const api = {
 
   // ─── Live execution (5paisa) — use with care ─
   trading: {
-    executeScan: (legs: Array<{ action: "BUY" | "SELL"; scripCode?: number; premium: number }>, quantity?: number) =>
+    executeScan: (
+      legs: Array<{
+        action: "BUY" | "SELL";
+        scripCode?: number;
+        premium: number;
+        strike?: number;
+        optionType?: "CE" | "PE";
+      }>,
+      quantity?: number,
+      strategy?: {
+        scanTradeId?: string;
+        tradeType?: string;
+        direction?: string;
+        edge?: string;
+        rationale?: string[];
+      } | null,
+    ) =>
       apiFetch<{
         results: Array<{
           scripCode: number;
@@ -79,10 +95,34 @@ export const api = {
         }>;
         quantity: number;
         allOk: boolean;
+        journalOpenId?: string | null;
       }>("/trading/execute-scan", {
         method: "POST",
-        body: JSON.stringify({ legs, quantity }),
+        body: JSON.stringify({ legs, quantity, strategy }),
       }),
+  },
+
+  journal: {
+    list: (limit?: number) =>
+      apiFetch<{
+        mongoConfigured?: boolean;
+        message?: string;
+        records: any[];
+      }>(`/journal${limit ? `?limit=${limit}` : ""}`),
+    pnl: (period: "week" | "month" | "year") =>
+      apiFetch<{
+        mongoConfigured?: boolean;
+        period: string;
+        buckets: Array<{
+          bucket: string;
+          label: string;
+          tradeCount: number;
+          totalPnlRupees: number;
+          avgPnlRupees: number;
+          wins: number;
+          losses: number;
+        }>;
+      }>(`/journal/pnl?period=${period}`),
   },
 
   // ─── Backtest ────────────────────────────────

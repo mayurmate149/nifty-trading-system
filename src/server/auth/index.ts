@@ -10,6 +10,7 @@
  */
 
 import { AuthSession, LoginRequest } from "@/types/auth";
+import { getSimulatorHttpBase, useSimulatorTrading } from "@/server/env/trading-mode";
 import crypto from "crypto";
 
 // ─── In-Memory Session Store ─────────────────
@@ -26,21 +27,21 @@ if (!globalForSessions.__sessions) {
 const sessions = globalForSessions.__sessions;
 
 // ─── Simulator vs Real 5paisa Toggle ─────────
-const USE_SIMULATOR = process.env.USE_SIMULATOR === "true";
-const SIMULATOR_URL = process.env.SIMULATOR_URL || "http://localhost:9500";
+const USE_SIMULATOR = useSimulatorTrading();
+const SIMULATOR_HTTP_BASE = getSimulatorHttpBase(USE_SIMULATOR);
 
 if (USE_SIMULATOR) {
-  console.log("[AUTH] 🎮 SIMULATOR MODE — using mock server at", SIMULATOR_URL);
+  console.log("[AUTH] 🎮 SIMULATOR MODE — using mock server at", SIMULATOR_HTTP_BASE);
 } else {
   console.log("[AUTH] 🔴 LIVE MODE — using real 5paisa APIs");
 }
 
 const FIVEPAISA_LOGIN_URL = USE_SIMULATOR
-  ? `${SIMULATOR_URL}/WebVendorLogin/VLogin/Index`
+  ? `${SIMULATOR_HTTP_BASE}/WebVendorLogin/VLogin/Index`
   : "https://dev-openapi.5paisa.com/WebVendorLogin/VLogin/Index";
 
 const FIVEPAISA_TOKEN_URL = USE_SIMULATOR
-  ? `${SIMULATOR_URL}/VendorsAPI/Service1.svc/GetAccessToken`
+  ? `${SIMULATOR_HTTP_BASE}/VendorsAPI/Service1.svc/GetAccessToken`
   : "https://Openapi.5paisa.com/VendorsAPI/Service1.svc/GetAccessToken";
 
 export function getOAuthRedirectUrl(): string {

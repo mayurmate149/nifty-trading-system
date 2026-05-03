@@ -13,7 +13,12 @@ export async function GET(request: NextRequest) {
 
   const session = await verifySession(sessionId);
   if (!session) {
-    return NextResponse.json({ error: "Session expired" }, { status: 401 });
+    const response = NextResponse.json(
+      { error: "Session expired", detail: "Unknown or expired session — please sign in again" },
+      { status: 401 },
+    );
+    response.cookies.delete("session_id");
+    return response;
   }
 
   return NextResponse.json({

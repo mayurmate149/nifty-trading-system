@@ -69,8 +69,17 @@ async function exitAllPositions(): Promise<any> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action: "exit-all" }),
   });
-  if (!res.ok) throw new Error("Failed to exit all positions");
-  return res.json();
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg =
+      typeof data?.error === "string"
+        ? data.error
+        : typeof data?.message === "string"
+          ? data.message
+          : "Failed to exit all positions";
+    throw new Error(msg);
+  }
+  return data;
 }
 
 async function fetchTradingSnapshot(
@@ -130,6 +139,8 @@ export default function PositionsPage() {
       setShowExitConfirm(false);
       queryClient.invalidateQueries({ queryKey: ["tradingSnapshot"] });
       queryClient.invalidateQueries({ queryKey: ["indicators"] });
+      queryClient.invalidateQueries({ queryKey: ["journal"] });
+      queryClient.invalidateQueries({ queryKey: ["journal-pnl"] });
     },
   });
 

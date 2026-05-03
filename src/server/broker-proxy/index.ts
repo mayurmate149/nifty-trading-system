@@ -7,13 +7,14 @@
  */
 
 import { Position } from "@/types/position";
+import { getSimulatorHttpBase, useSimulatorTrading } from "@/server/env/trading-mode";
 
 // ─── Simulator vs Real 5paisa Toggle ─────────
-const USE_SIMULATOR = process.env.USE_SIMULATOR === "true";
-const SIMULATOR_URL = process.env.SIMULATOR_URL || "http://localhost:9500";
+const USE_SIMULATOR = useSimulatorTrading();
+const SIMULATOR_HTTP_BASE = getSimulatorHttpBase(USE_SIMULATOR);
 
 const BASE_URL = USE_SIMULATOR
-  ? `${SIMULATOR_URL}/VendorsAPI/Service1.svc`
+  ? `${SIMULATOR_HTTP_BASE}/VendorsAPI/Service1.svc`
   : "https://Openapi.5paisa.com/VendorsAPI/Service1.svc";
 
 if (USE_SIMULATOR) {

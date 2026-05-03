@@ -1,8 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withAuth } from "@/server/middleware/auth";
 import { placeOrder } from "@/server/broker-proxy";
+import {
+  insertOpenEntryFromExecuteScan,
+  type JournalStrategyContext,
+} from "@/server/journal/trade-journal-store";
 
 const DEFAULT_NIFTY_LOT = 75;
+
+type ExecuteScanBody = {
+  legs?: Array<{
+    action: "BUY" | "SELL";
+    scripCode?: number;
+    premium: number;
+    strike?: number;
+    optionType?: "CE" | "PE";
+  }>;
+  quantity?: number;
+  strategy?: JournalStrategyContext | null;
+};
 
 /**
  * POST /api/v1/trading/execute-scan
@@ -12,18 +28,13 @@ const DEFAULT_NIFTY_LOT = 75;
 export async function POST(request: NextRequest) {
   return withAuth(request, async (req, session) => {
     try {
-      const body = (await req.json()) as {
-        legs?: Array<{
-          action: "BUY" | "SELL";
-          scripCode?: number;
-          premium: number;
-        }>;
-        quantity?: number;
-      };
+      const body = (await req.json()) as ExecuteScanBody;
       const legs = body.legs;
-      const quantity = typeof body.quantity === "number" && body.quantity > 0
-        ? body.quantity
-        : DEFAULT_NIFTY_LOT;
+      const quantity =
+        typeof body.quantity === "number" && body.quantity > 0
+          ? body.quantity
+          : DEFAULT_NIFTY_LOT;
+      const strategy = body.strategy ?? null;
 
       if (!Array.isArray(legs) || legs.length === 0) {
         return NextResponse.json({ error: "legs array required" }, { status: 400 });
@@ -49,7 +60,8 @@ export async function POST(request: NextRequest) {
           results.push({
             scripCode: 0,
             ok: false,
-            error: "Missing ScripCode. Refresh options data — broker must return scrip on chain.",
+            error:
+              "Missing ScripCode. Refresh options data — broker must return scrip on chain.",
             buySell: leg.action === "BUY" ? "B" : "S",
             price: 0,
           });
@@ -93,7 +105,47 @@ export async function POST(request: NextRequest) {
       }
 
       const allOk = results.every((r) => r.ok);
-      return NextResponse.json({ results, quantity, allOk });
+
+      const journalEntryLegs = results.map((r, i) => {
+        const leg = sorted[i];
+        return {
+          scripCode: r.scripCode || leg?.scripCode || 0,
+          action:
+            leg?.action ??
+            ((r.buySell === "B" ? "BUY" : "SELL") as "BUY" | "SELL"),
+          quantity,
+          limitPrice: r.price,
+          strike: leg?.strike,
+          optionType: leg?.optionType,
+          orderId: r.orderId,
+          ok: r.ok,
+          error: r.error,
+        };
+      });
+
+      let journalOpenId: string | null = null;
+      try {
+        const journalSnap = await insertOpenEntryFromExecuteScan({
+          clientCode: session.clientCode,
+          quantityLot: quantity,
+          strategy,
+          entryLegs: journalEntryLegs,
+          allEntryOrdersOk: allOk,
+        });
+        journalOpenId = journalSnap?.id ?? null;
+      } catch (err) {
+        console.error(
+          "[JOURNAL] Open entry persistence failed:",
+          err instanceof Error ? err.message : err,
+        );
+      }
+
+      return NextResponse.json({
+        results,
+        quantity,
+        allOk,
+        journalOpenId,
+      });
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "execute-scan failed";
       return NextResponse.json({ error: msg }, { status: 500 });

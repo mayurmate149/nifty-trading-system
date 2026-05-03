@@ -30,6 +30,8 @@ import { AutoExitConfig, AutoExitState, RiskSummary } from "@/types/risk";
 import { Position } from "@/types/position";
 import { getPositions, placeOrder, getMargin, computeMarginFromPositions } from "@/server/broker-proxy";
 import { sendNotification, pushEvent } from "@/server/risk/notifier";
+import type { ExitReasonKind } from "@/server/journal/trade-journal-store";
+import { insertPortfolioExit } from "@/server/journal/trade-journal-store";
 
 // ─── Persist state across Next.js HMR (dev) ─────
 // All state lives on globalThis so it survives module hot-reloads
@@ -318,7 +320,16 @@ export async function evaluateExitRules(positions: Position[], brokerUsedMargin?
     console.log(
       `[AUTO-EXIT] 🔴🔴 TRAILING SL HIT: P&L ${portfolioPnlPct.toFixed(2)}% <= SL ${activeSL.toFixed(1)}% → EXIT ALL (${reason})`
     );
-    await executeExitAll(watchedOpen, reason, portfolioPnlPct, totalPnl);
+    await executeExitAll(
+      watchedOpen,
+      reason,
+      portfolioPnlPct,
+      totalPnl,
+      "auto-exit",
+      totalCapital,
+    ).catch((e) =>
+      console.error("[AUTO-EXIT] executeExitAll failed:", e instanceof Error ? e.message : e),
+    );
     return;
   }
 }
@@ -327,127 +338,186 @@ export async function evaluateExitRules(positions: Position[], brokerUsedMargin?
 
 async function executeExitAll(
   positions: Position[],
-  reason: "STOP_LOSS" | "TAKE_PROFIT" | "BREAKEVEN",
+  reason: ExitReasonKind,
   portfolioPnlPct: number,
-  totalPnl: number
-): Promise<void> {
+  totalPnl: number,
+  exitSource: "auto-exit" | "manual-exit-all",
+  capitalAtSnapshot: number,
+): Promise<{ succeeded: number; failed: number }> {
   const creds = g.__autoExitCredentials;
   if (!creds) {
-    console.error("[AUTO-EXIT] No credentials — cannot exit");
+    const msg = "Cannot exit: no broker credentials stored (auto-exit engine has no active session)";
+    console.error("[AUTO-EXIT]", msg);
     pushEvent({
       type: "ERROR",
       positionId: "PORTFOLIO",
-      message: "Cannot exit: no broker credentials stored",
+      message: msg,
       timestamp: Date.now(),
     });
-    return;
+    throw new Error(msg);
+  }
+
+  if (positions.length === 0) {
+    return { succeeded: 0, failed: 0 };
   }
 
   g.__exitingAll = true;
 
-  const reasonLabels = {
-    STOP_LOSS: "🔴 Portfolio Stop-Loss",
-    TAKE_PROFIT: "🟢 Portfolio Take-Profit",
-    BREAKEVEN: "⚪ Portfolio Breakeven",
-  };
+  const legsAtExitSnapshot =
+    positions.map((p) => ({
+      scripCode: parseInt(p.positionId, 10) || 0,
+      symbol: p.symbol,
+      quantity: p.quantity,
+      avgPrice: p.avgPrice,
+      ltp: p.ltp,
+      mtmRupee: p.pl,
+    }));
 
-  pushEvent({
-    type: reason,
-    positionId: "PORTFOLIO",
-    message: `${reasonLabels[reason]}: Exiting ALL ${positions.length} positions (P&L: ${portfolioPnlPct.toFixed(2)}%, ₹${totalPnl.toFixed(0)})`,
-    timestamp: Date.now(),
-    data: { reason, portfolioPnlPct, totalPnl, positionCount: positions.length },
-  });
+  let succeeded = 0;
+  let failed = 0;
 
-  // Exit in correct order: close SELL legs first (buy-to-close), then BUY legs (sell-to-close)
-  // This keeps the hedge alive while closing the risky short positions first.
-  const sellPositions = positions.filter((p) => p.quantity < 0); // short legs → exit by BUY
-  const buyPositions = positions.filter((p) => p.quantity > 0);  // long legs  → exit by SELL
+  try {
+    const reasonLabels: Record<ExitReasonKind, string> = {
+      STOP_LOSS: "🔴 Portfolio Stop-Loss",
+      TAKE_PROFIT: "🟢 Portfolio Take-Profit",
+      BREAKEVEN: "⚪ Portfolio Breakeven",
+      MANUAL_EXIT_ALL: "⚡ Manual exit all",
+    };
 
-  const exitOne = async (pos: Position) => {
-    const exitSide: "B" | "S" = pos.quantity > 0 ? "S" : "B";
-    const exitQty = Math.abs(pos.quantity);
-    const scripCode = parseInt(pos.positionId) || 0;
+    pushEvent({
+      type: reason,
+      positionId: "PORTFOLIO",
+      message: `${reasonLabels[reason]}: Exiting ALL ${positions.length} positions (P&L: ${portfolioPnlPct.toFixed(2)}%, ₹${totalPnl.toFixed(0)})`,
+      timestamp: Date.now(),
+      data: { reason, portfolioPnlPct, totalPnl, positionCount: positions.length },
+    });
 
-    // Use LTP-based aggressive limit price for F&O exit (market orders rejected for derivatives)
-    // BUY-to-close  → bid slightly above LTP (+0.5) for faster fill
-    // SELL-to-close → ask slightly below LTP (-0.5) for faster fill
-    const ltp = pos.ltp || pos.avgPrice || 1;
-    const exitPrice = parseFloat(
-      (exitSide === "B" ? ltp + 0.5 : Math.max(ltp - 0.5, 0.05)).toFixed(2)
+    const sellPositions = positions.filter((p) => p.quantity < 0);
+    const buyPositions = positions.filter((p) => p.quantity > 0);
+
+    const exitOne = async (pos: Position) => {
+      const exitSide: "B" | "S" = pos.quantity > 0 ? "S" : "B";
+      const exitQty = Math.abs(pos.quantity);
+      const scripCode = parseInt(pos.positionId, 10) || 0;
+
+      const ltp = pos.ltp || pos.avgPrice || 1;
+      const exitPrice = parseFloat(
+        (exitSide === "B" ? ltp + 0.5 : Math.max(ltp - 0.5, 0.05)).toFixed(2),
+      );
+
+      console.log(
+        `[AUTO-EXIT] 📤 Placing exit order: ${pos.symbol} | ScripCode: ${scripCode} | ` +
+          `Side: ${exitSide} | Qty: ${exitQty} | Price: ${exitPrice} (LTP: ${ltp}) | ` +
+          `Exchange: ${pos.exchange || "N"} | ExchType: ${pos.exchangeType || "D"} | Intraday: ${pos.isIntraday ?? false}`,
+      );
+
+      try {
+        const result = await placeOrder(creds, {
+          scripCode,
+          quantity: exitQty,
+          buySell: exitSide,
+          exchange: pos.exchange || "N",
+          exchangeType: pos.exchangeType || "D",
+          price: exitPrice,
+          isIntraday: pos.isIntraday ?? false,
+          atMarket: false,
+        });
+
+        console.log(
+          `[AUTO-EXIT] ✅ Exited ${pos.symbol} (${exitSide === "B" ? "BUY" : "SELL"} ${exitQty} @ ₹${exitPrice}) | Order: ${result?.ExchOrderID}`,
+        );
+
+        pushEvent({
+          type: "EXIT_EXECUTED",
+          positionId: pos.positionId,
+          message: `Exited ${pos.symbol}: ${exitSide === "B" ? "BUY" : "SELL"} ${exitQty} @ ₹${exitPrice}`,
+          timestamp: Date.now(),
+          data: { orderId: result?.ExchOrderID, ltp: pos.ltp, pl: pos.pl },
+        });
+
+        return {
+          success: true as const,
+          symbol: pos.symbol,
+          scripCode,
+          buySell: exitSide,
+          quantity: exitQty,
+          limitPrice: exitPrice,
+          orderId: result?.ExchOrderID != null ? String(result.ExchOrderID) : undefined,
+          mtmRupeeBeforeExit: pos.pl,
+        };
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        console.error(`[AUTO-EXIT] ❌ Failed to exit ${pos.symbol}:`, msg);
+        pushEvent({
+          type: "ERROR",
+          positionId: pos.positionId,
+          message: `Failed to exit ${pos.symbol}: ${msg}`,
+          timestamp: Date.now(),
+        });
+        return {
+          success: false as const,
+          symbol: pos.symbol,
+          scripCode,
+          buySell: exitSide,
+          quantity: exitQty,
+          limitPrice: exitPrice,
+          orderId: undefined,
+          error: msg,
+          mtmRupeeBeforeExit: pos.pl,
+        };
+      }
+    };
+
+    console.log(`[AUTO-EXIT] Step 1: Closing ${sellPositions.length} SELL legs (buy-to-close)...`);
+    const sellResults = await Promise.all(sellPositions.map(exitOne));
+
+    console.log(`[AUTO-EXIT] Step 2: Closing ${buyPositions.length} BUY legs (sell-to-close)...`);
+    const buyResults = await Promise.all(buyPositions.map(exitOne));
+
+    const results = [...sellResults, ...buyResults];
+    succeeded = results.filter((r) => r.success).length;
+    failed = results.filter((r) => !r.success).length;
+
+    await insertPortfolioExit({
+      clientCode: creds.clientCode,
+      source: exitSource,
+      exitReason: reason,
+      portfolioPnlPct,
+      pnlRupees: totalPnl,
+      capitalAtSnapshot,
+      legsAtExit: legsAtExitSnapshot,
+      exitOrders: results.map((r) => ({
+        scripCode: r.scripCode,
+        symbol: r.symbol,
+        buySell: r.buySell,
+        quantity: r.quantity,
+        limitPrice: r.limitPrice,
+        orderId: r.orderId,
+        ok: !!r.success,
+        error: "error" in r ? r.error : undefined,
+        mtmRupeeBeforeExit: r.mtmRupeeBeforeExit,
+      })),
+    }).catch((e) =>
+      console.error("[JOURNAL] Failed to persist portfolio exit:", e instanceof Error ? e.message : e),
     );
 
-    console.log(
-      `[AUTO-EXIT] 📤 Placing exit order: ${pos.symbol} | ScripCode: ${scripCode} | ` +
-      `Side: ${exitSide} | Qty: ${exitQty} | Price: ${exitPrice} (LTP: ${ltp}) | ` +
-      `Exchange: ${pos.exchange || "N"} | ExchType: ${pos.exchangeType || "D"} | Intraday: ${pos.isIntraday ?? false}`
-    );
+    await sendNotification({
+      type: "EXIT_TRIGGER",
+      title: `${reasonLabels[reason]} — ALL EXITED`,
+      message: `${succeeded}/${positions.length} positions exited (${failed} failed) | Portfolio P&L: ${portfolioPnlPct.toFixed(2)}% (₹${totalPnl.toFixed(0)})`,
+      data: { reason, portfolioPnlPct, totalPnl, succeeded, failed },
+    });
 
-    try {
-      const result = await placeOrder(creds, {
-        scripCode,
-        quantity: exitQty,
-        buySell: exitSide,
-        exchange: pos.exchange || "N",
-        exchangeType: pos.exchangeType || "D",
-        price: exitPrice,
-        isIntraday: pos.isIntraday ?? false,
-        atMarket: false,
-      });
+    unwatchAll();
+    g.__peakPortfolioPnlPct = 0;
+    g.__portfolioTrailingSLPct = undefined;
+    stopEngine();
 
-      console.log(`[AUTO-EXIT] ✅ Exited ${pos.symbol} (${exitSide === "B" ? "BUY" : "SELL"} ${exitQty} @ ₹${exitPrice}) | Order: ${result?.ExchOrderID}`);
-
-      pushEvent({
-        type: "EXIT_EXECUTED",
-        positionId: pos.positionId,
-        message: `Exited ${pos.symbol}: ${exitSide === "B" ? "BUY" : "SELL"} ${exitQty} @ ₹${exitPrice}`,
-        timestamp: Date.now(),
-        data: { orderId: result?.ExchOrderID, ltp: pos.ltp, pl: pos.pl },
-      });
-
-      return { success: true, symbol: pos.symbol };
-    } catch (error: any) {
-      console.error(`[AUTO-EXIT] ❌ Failed to exit ${pos.symbol}:`, error.message);
-      pushEvent({
-        type: "ERROR",
-        positionId: pos.positionId,
-        message: `Failed to exit ${pos.symbol}: ${error.message}`,
-        timestamp: Date.now(),
-      });
-      return { success: false, symbol: pos.symbol, error: error.message };
-    }
-  };
-
-  // Step 1: Close all SELL (short) positions in parallel
-  console.log(`[AUTO-EXIT] Step 1: Closing ${sellPositions.length} SELL legs (buy-to-close)...`);
-  const sellResults = await Promise.all(sellPositions.map(exitOne));
-
-  // Step 2: Close all BUY (long) positions in parallel
-  console.log(`[AUTO-EXIT] Step 2: Closing ${buyPositions.length} BUY legs (sell-to-close)...`);
-  const buyResults = await Promise.all(buyPositions.map(exitOne));
-
-  const results = [...sellResults, ...buyResults];
-  const succeeded = results.filter((r) => r.success).length;
-  const failed = results.filter((r) => !r.success).length;
-
-  // Summary notification
-  sendNotification({
-    type: "EXIT_TRIGGER",
-    title: `${reasonLabels[reason]} — ALL EXITED`,
-    message: `${succeeded}/${positions.length} positions exited (${failed} failed) | Portfolio P&L: ${portfolioPnlPct.toFixed(2)}% (₹${totalPnl.toFixed(0)})`,
-    data: { reason, portfolioPnlPct, totalPnl, succeeded, failed },
-  });
-
-  // Clear all watches & stop engine after full exit
-  unwatchAll();
-  g.__exitingAll = false;
-  g.__peakPortfolioPnlPct = 0;
-  g.__portfolioTrailingSLPct = undefined;
-
-  // Auto-stop engine after exit-all (all positions squared off)
-  stopEngine();
-
-  console.log(`[AUTO-EXIT] 🏁 EXIT-ALL complete: ${succeeded} ok, ${failed} failed. Engine stopped.`);
+    console.log(`[AUTO-EXIT] 🏁 EXIT-ALL complete: ${succeeded} ok, ${failed} failed. Engine stopped.`);
+    return { succeeded, failed };
+  } finally {
+    g.__exitingAll = false;
+  }
 }
 
 // ─── Engine Loop ─────────────────────────────
@@ -551,10 +621,22 @@ export async function exitAllNow(credentials: { accessToken: string; clientCode:
 
     console.log(`[AUTO-EXIT] 🔴 MANUAL EXIT ALL — ${openPositions.length} positions, P&L: ₹${totalPnl.toFixed(0)}`);
 
-    await executeExitAll(openPositions, "STOP_LOSS", pnlPct, totalPnl);
+    const capitalAtSnapshot = openPositions.reduce((s, p) => s + p.capitalDeployed, 0) || 1;
 
-    // Count results from the event log (approximate)
-    return { succeeded: openPositions.length, failed: 0, total: openPositions.length };
+    const counts = await executeExitAll(
+      openPositions,
+      "MANUAL_EXIT_ALL",
+      pnlPct,
+      totalPnl,
+      "manual-exit-all",
+      capitalAtSnapshot,
+    );
+
+    return {
+      succeeded: counts.succeeded,
+      failed: counts.failed,
+      total: openPositions.length,
+    };
   } catch (error: any) {
     console.error("[AUTO-EXIT] Manual exit-all failed:", error.message);
     pushEvent({
