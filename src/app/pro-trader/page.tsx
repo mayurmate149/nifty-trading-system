@@ -243,6 +243,13 @@ export default function ProTraderPage() {
   const [triggers, setTriggers] = useState<TriggerEvent[]>([]);
   const [notifEnabled, setNotifEnabled] = useState(false);
 
+  // Sync toggle with the browser's already-granted permission on mount so the
+  // button doesn't falsely read "Enable alerts" after a previous session.
+  useEffect(() => {
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    if (Notification.permission === "granted") setNotifEnabled(true);
+  }, []);
+
   const prevStatusRef = useRef<Record<string, Status> | null>(null);
   const prevFingerprintRef = useRef<Record<string, string>>({});
 
@@ -458,21 +465,29 @@ export default function ProTraderPage() {
           ) : (
             <ul className="divide-y divide-slate-800/60">
               {triggers.map((t) => (
-                <li key={t.id} className="flex items-center gap-3 py-2 text-sm">
-                  <span className="w-16 font-mono text-[11px] text-slate-500">
+                <li
+                  key={t.id}
+                  className="flex min-w-0 items-center gap-3 py-2 text-sm"
+                >
+                  <span className="w-16 flex-none font-mono text-[11px] text-slate-500">
                     {formatTime(t.at)}
                   </span>
-                  <span className="flex h-5 items-center rounded border border-slate-700 bg-slate-800 px-1.5 text-[10px] font-semibold text-slate-300">
+                  <span className="flex h-5 flex-none items-center rounded border border-slate-700 bg-slate-800 px-1.5 text-[10px] font-semibold text-slate-300">
                     {t.from} → {t.to}
                   </span>
-                  <span className="font-medium text-slate-200">{t.name}</span>
-                  <span className="truncate text-xs text-slate-400">
+                  <span className="flex-none font-medium text-slate-200">
+                    {t.name}
+                  </span>
+                  <span
+                    className="min-w-0 flex-1 truncate text-xs text-slate-400"
+                    title={t.headline}
+                  >
                     {t.headline}
                   </span>
                   <button
                     type="button"
                     onClick={() => setSelected(t.strategy)}
-                    className="ml-auto text-[11px] text-violet-300 hover:text-violet-200"
+                    className="flex-none text-[11px] text-violet-300 hover:text-violet-200"
                   >
                     Inspect
                   </button>
@@ -825,25 +840,36 @@ function StrategyCard({
               </span>
             </div>
             <ul className="space-y-0.5 font-mono text-[11px] text-slate-300">
-              {card.pick.legs.slice(0, 4).map((leg, i) => (
-                <li key={i} className="flex items-center gap-1">
-                  <span
-                    className={`inline-block w-8 text-[10px] font-bold ${
-                      leg.action === "SELL"
-                        ? "text-rose-300"
-                        : "text-emerald-300"
-                    }`}
-                  >
-                    {leg.action}
-                  </span>
-                  <span className="text-slate-400">
-                    {leg.strike} {leg.optionType}
-                  </span>
-                  <span className="ml-auto tabular-nums text-slate-500">
-                    ₹{leg.premium.toFixed(1)}
-                  </span>
-                </li>
-              ))}
+              {card.pick.legs.slice(0, 4).map((leg, i) => {
+                const hasScrip = typeof leg.scripCode === "number";
+                return (
+                  <li key={i} className="flex items-center gap-1">
+                    <span
+                      className={`inline-block w-8 text-[10px] font-bold ${
+                        leg.action === "SELL"
+                          ? "text-rose-300"
+                          : "text-emerald-300"
+                      }`}
+                    >
+                      {leg.action}
+                    </span>
+                    <span className="text-slate-400">
+                      {leg.strike} {leg.optionType}
+                    </span>
+                    {!hasScrip && (
+                      <span
+                        className="rounded bg-amber-500/15 px-1 text-[9px] font-semibold text-amber-300"
+                        title="Broker scrip missing for this strike"
+                      >
+                        no scrip
+                      </span>
+                    )}
+                    <span className="ml-auto tabular-nums text-slate-500">
+                      ₹{leg.premium.toFixed(1)}
+                    </span>
+                  </li>
+                );
+              })}
             </ul>
             <div className="mt-2 grid grid-cols-2 gap-1.5 border-t border-slate-800 pt-2 text-[10px] text-slate-400">
               <span>
@@ -888,6 +914,16 @@ function StrategyCard({
   );
 }
 
+/** Short tags for compact chips — better than arbitrary 5-char slicing. */
+const GROUP_SHORT: Record<RuleGroup, string> = {
+  trend: "Trend",
+  momentum: "Mom",
+  volatility: "Vol",
+  option_chain: "Chain",
+  structure: "Struct",
+  volume: "Part",
+};
+
 function GroupChip({ g }: { g: MonitorGroup }) {
   const pct = g.weightTotal > 0 ? Math.round((g.weightPassed / g.weightTotal) * 100) : 0;
   const tone =
@@ -898,14 +934,14 @@ function GroupChip({ g }: { g: MonitorGroup }) {
         : "border-rose-500/30 bg-rose-500/5 text-rose-200";
   return (
     <div
-      className={`flex items-center justify-between rounded-md border px-1.5 py-1 text-[10px] ${tone}`}
-      title={`${GROUP_LABELS[g.group]}: ${g.passed}/${g.total} rules passed`}
+      className={`flex items-center justify-between gap-1 rounded-md border px-1.5 py-1 text-[10px] ${tone}`}
+      title={`${GROUP_LABELS[g.group]} · ${g.passed}/${g.total} rules passed (${pct}% weighted)`}
     >
-      <span className="flex items-center gap-1">
+      <span className="flex min-w-0 items-center gap-1">
         <span aria-hidden>{GROUP_ICONS[g.group]}</span>
-        <span className="font-medium">{GROUP_LABELS[g.group].slice(0, 5)}</span>
+        <span className="truncate font-medium">{GROUP_SHORT[g.group]}</span>
       </span>
-      <span className="font-mono font-semibold">
+      <span className="font-mono font-semibold tabular-nums">
         {g.passed}/{g.total}
       </span>
     </div>
@@ -935,12 +971,16 @@ function EnterButton({ card }: { card: StrategyCard }) {
     ? card.pick.legs.filter((l) => typeof l.scripCode !== "number")
     : [];
   const hardDisabled = !card.pick || missingScrip.length > 0;
+  const missingDetail =
+    missingScrip
+      .map((l) => `${l.action} ${l.strike}${l.optionType}`)
+      .join(", ") || "";
   const disabledReason: string | null = !card.pick
     ? "Chain pick unavailable — waiting for live option chain data"
     : missingScrip.length > 0
-      ? `Missing scrip for ${missingScrip.length} leg${
+      ? `Broker scrip missing for ${missingScrip.length} leg${
           missingScrip.length > 1 ? "s" : ""
-        } — refresh option chain`
+        } (${missingDetail}) — try another strike or refresh chain`
       : null;
 
   const mutation = useMutation({
@@ -991,19 +1031,14 @@ function EnterButton({ card }: { card: StrategyCard }) {
     },
   });
 
-  const onClick = () => {
+  const onClick = (e: React.MouseEvent) => {
+    // Stop bubbling so clicking Enter inside the detail modal doesn't also
+    // trigger the detail modal's backdrop-close handler.
+    e.stopPropagation();
     if (hardDisabled) return;
-    if (card.status === "READY") {
-      const msg = `Enter ${card.name} (${card.pick?.legs.length} leg${
-        (card.pick?.legs.length ?? 0) > 1 ? "s" : ""
-      })?`;
-      if (typeof window !== "undefined" && !window.confirm(msg)) return;
-      mutation.mutate();
-    } else {
-      // ARMED / WAIT / AVOID → show the detailed confirm modal so the trader
-      // reviews what's failing before firing orders.
-      setShowConfirm(true);
-    }
+    // Every status uses the styled confirmation modal — consistent UX, and
+    // READY gets a positive confirmation banner instead of a native alert.
+    setShowConfirm(true);
   };
 
   // Button visual
@@ -1095,7 +1130,16 @@ function EnterButton({ card }: { card: StrategyCard }) {
   );
 }
 
-/** Compact confirmation modal for ARMED / WAIT / AVOID entries. */
+/**
+ * Unified entry-confirmation modal used for every status (READY → AVOID).
+ *
+ * READY shows a positive green banner; ARMED / WAIT / AVOID show the failing
+ * checks so the trader knows exactly what they're overriding.
+ *
+ * IMPORTANT: when nested inside the StrategyDetailModal, we must stop event
+ * propagation on the backdrop + buttons — otherwise React synthetic events
+ * bubble up to the parent modal's `onClick={onClose}` and close both.
+ */
 function SoftEnterConfirm({
   card,
   onCancel,
@@ -1111,10 +1155,23 @@ function SoftEnterConfirm({
 
   const statusStyle = STATUS_STYLE[card.status];
 
+  const handleBackdrop = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onCancel();
+  };
+  const handleCancel = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onCancel();
+  };
+  const handleConfirm = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onConfirm();
+  };
+
   return (
     <div
       className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
-      onClick={onCancel}
+      onClick={handleBackdrop}
     >
       <div
         role="dialog"
@@ -1140,24 +1197,30 @@ function SoftEnterConfirm({
         </header>
 
         <section className="space-y-3 px-5 py-4 text-sm">
+          {card.status === "READY" && (
+            <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs text-emerald-200">
+              All critical rules are aligned and weighted match is{" "}
+              {card.matchPct}%. You&rsquo;re clear to fire the order.
+            </div>
+          )}
           {card.status === "AVOID" && (
             <div className="rounded-md border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-200">
               <strong>Warning:</strong> the rule engine rates this setup as
               AVOID. Forcing an entry here means the expected edge is either
               absent or actively negative. Only proceed if you have a specific
-              reason the model can't see.
+              reason the model can&rsquo;t see.
             </div>
           )}
           {card.status === "WAIT" && (
             <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-200">
               Fewer than 55% of weighted rules are aligning — entering now
-              means several checks haven't fired yet.
+              means several checks haven&rsquo;t fired yet.
             </div>
           )}
           {card.status === "ARMED" && (
             <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-200">
               Setup is close to READY (match ≥ 55%) but a few weighted checks
-              are still missing. Confirm you're happy to proceed.
+              are still missing. Confirm you&rsquo;re happy to proceed.
             </div>
           )}
 
@@ -1258,23 +1321,27 @@ function SoftEnterConfirm({
         <footer className="flex items-center justify-end gap-2 border-t border-slate-800 bg-slate-950 px-5 py-3">
           <button
             type="button"
-            onClick={onCancel}
+            onClick={handleCancel}
             className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-500 hover:text-white"
           >
             Cancel
           </button>
           <button
             type="button"
-            onClick={onConfirm}
+            onClick={handleConfirm}
             className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
-              card.status === "AVOID"
-                ? "bg-rose-600 text-white hover:bg-rose-500"
-                : "bg-amber-500 text-slate-950 hover:bg-amber-400"
+              card.status === "READY"
+                ? "bg-emerald-500 text-slate-950 hover:bg-emerald-400"
+                : card.status === "AVOID"
+                  ? "bg-rose-600 text-white hover:bg-rose-500"
+                  : "bg-amber-500 text-slate-950 hover:bg-amber-400"
             }`}
           >
-            {card.status === "AVOID"
-              ? "Force enter anyway"
-              : `Place ${card.pick?.legs.length ?? 0}-leg order`}
+            {card.status === "READY"
+              ? `Place ${card.pick?.legs.length ?? 0}-leg order`
+              : card.status === "AVOID"
+                ? "Force enter anyway"
+                : `Place ${card.pick?.legs.length ?? 0}-leg order`}
           </button>
         </footer>
       </div>
@@ -1314,29 +1381,33 @@ function StrategyDetailModal({
         className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-slate-700 bg-slate-950 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <header className="sticky top-0 flex items-center justify-between gap-4 border-b border-slate-800 bg-slate-950/95 px-5 py-3 backdrop-blur">
-          <div>
+        <header className="sticky top-0 flex flex-wrap items-start justify-between gap-x-4 gap-y-2 border-b border-slate-800 bg-slate-950/95 px-5 py-3 backdrop-blur">
+          <div className="min-w-0 flex-1">
             <p className="text-[10px] uppercase tracking-[0.2em] text-slate-500">
               Strategy detail
             </p>
-            <h3 className="text-lg font-bold text-white">
+            <h3 className="truncate text-lg font-bold text-white">
               {card.icon} {card.name}
             </h3>
-            <p className="mt-0.5 text-[11px] text-slate-400">{card.summary}</p>
+            <p className="mt-0.5 line-clamp-2 text-[11px] text-slate-400">
+              {card.summary}
+            </p>
           </div>
-          <span
-            className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2.5 py-1 text-xs font-semibold ${STATUS_STYLE[card.status].badge}`}
-          >
-            <span className={`h-1.5 w-1.5 rounded-full ${STATUS_STYLE[card.status].dot}`} />
-            {STATUS_STYLE[card.status].label} · {card.matchPct}%
-          </span>
-          <button
-            onClick={onClose}
-            className="rounded-md p-1 text-slate-400 hover:bg-slate-800 hover:text-white"
-            aria-label="Close"
-          >
-            ✕
-          </button>
+          <div className="flex flex-none items-center gap-2">
+            <span
+              className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2.5 py-1 text-xs font-semibold ${STATUS_STYLE[card.status].badge}`}
+            >
+              <span className={`h-1.5 w-1.5 rounded-full ${STATUS_STYLE[card.status].dot}`} />
+              {STATUS_STYLE[card.status].label} · {card.matchPct}%
+            </span>
+            <button
+              onClick={onClose}
+              className="rounded-md p-1 text-slate-400 hover:bg-slate-800 hover:text-white"
+              aria-label="Close"
+            >
+              ✕
+            </button>
+          </div>
         </header>
 
         <section className="p-5">
@@ -1413,30 +1484,43 @@ function StrategyDetailModal({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800 font-mono text-[13px]">
-                  {card.pick.legs.map((l, i) => (
-                    <tr key={i}>
-                      <td
-                        className={`px-3 py-2 font-semibold ${
-                          l.action === "SELL"
-                            ? "text-rose-300"
-                            : "text-emerald-300"
-                        }`}
-                      >
-                        {l.action}
-                      </td>
-                      <td className="px-3 py-2 tabular-nums">{l.strike}</td>
-                      <td className="px-3 py-2">{l.optionType}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">
-                        {l.premium.toFixed(2)}
-                      </td>
-                      <td className="px-3 py-2 text-right tabular-nums">
-                        {l.iv.toFixed(1)}
-                      </td>
-                      <td className="px-3 py-2 text-right tabular-nums text-slate-400">
-                        {(l.oi / 1000).toFixed(1)}k
-                      </td>
-                    </tr>
-                  ))}
+                  {card.pick.legs.map((l, i) => {
+                    const hasScrip = typeof l.scripCode === "number";
+                    return (
+                      <tr key={i} className={!hasScrip ? "bg-amber-500/5" : ""}>
+                        <td
+                          className={`px-3 py-2 font-semibold ${
+                            l.action === "SELL"
+                              ? "text-rose-300"
+                              : "text-emerald-300"
+                          }`}
+                        >
+                          {l.action}
+                        </td>
+                        <td className="px-3 py-2 tabular-nums">
+                          {l.strike}
+                          {!hasScrip && (
+                            <span
+                              className="ml-2 rounded bg-amber-500/15 px-1 text-[10px] font-semibold text-amber-300"
+                              title="Broker scrip code missing for this strike — can't be ordered"
+                            >
+                              no scrip
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2">{l.optionType}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {l.premium.toFixed(2)}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {l.iv.toFixed(1)}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums text-slate-400">
+                          {(l.oi / 1000).toFixed(1)}k
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -1555,8 +1639,23 @@ function StripSkeleton() {
       {Array.from({ length: 8 }).map((_, i) => (
         <div
           key={i}
-          className="h-80 animate-pulse rounded-2xl border border-slate-800 bg-slate-900/40"
-        />
+          className="flex h-[22rem] animate-pulse flex-col gap-2 rounded-2xl border border-slate-800 bg-slate-900/40 p-3"
+        >
+          <div className="h-4 w-2/3 rounded bg-slate-800" />
+          <div className="h-2 w-full rounded bg-slate-800/70" />
+          <div className="mt-1 flex gap-1">
+            <div className="h-4 w-12 rounded-full bg-slate-800/70" />
+            <div className="h-4 w-12 rounded-full bg-slate-800/70" />
+            <div className="h-4 w-16 rounded-full bg-slate-800/70" />
+          </div>
+          <div className="mt-1 grid grid-cols-3 gap-1.5">
+            {Array.from({ length: 6 }).map((__, j) => (
+              <div key={j} className="h-5 rounded bg-slate-800/70" />
+            ))}
+          </div>
+          <div className="mt-auto h-20 rounded bg-slate-800/60" />
+          <div className="h-7 rounded bg-slate-800/70" />
+        </div>
       ))}
     </div>
   );
