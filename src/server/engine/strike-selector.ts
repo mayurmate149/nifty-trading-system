@@ -15,7 +15,7 @@
 import { StrategyType, StrategyLeg, TradeDirection } from "@/types/strategy";
 import { OptionChainStrike } from "@/types/market";
 
-const NIFTY_LOT = 75;
+const NIFTY_LOT = 65;
 const NIFTY_STEP = 50;
 
 export interface StrikeSelection {

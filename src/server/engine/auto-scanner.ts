@@ -135,7 +135,7 @@ export interface AutoScanInput {
 // ─── Constants ───────────────────────────────
 
 const NIFTY_STEP = 50;
-const LOT_SIZE = 75;
+const LOT_SIZE = 65;
 const DEFAULT_CAPITAL = 200_000; // ₹2L for 2% = ₹4,000 target
 
 const EMPTY_PRO: ProfessionalIndicatorBundle = {

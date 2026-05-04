@@ -70,7 +70,7 @@ export default function TradeSuggestionsPage() {
         riskParams: {
           maxCapitalPercent: 5.0,
           confidenceThreshold: threshold,
-          lotSize: 75,
+          lotSize: 65,
         },
       }) as Promise<SuggestResponse>,
     enabled: false,

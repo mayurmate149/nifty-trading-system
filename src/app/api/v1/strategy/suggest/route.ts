@@ -27,7 +27,7 @@ export async function POST(request: NextRequest) {
       const riskParams = {
         maxCapitalPercent: 5,
         confidenceThreshold: 50,
-        lotSize: 75,
+        lotSize: 65,
         ...body.riskParams,
       };
       const strategies = body.strategies; // undefined = scan all

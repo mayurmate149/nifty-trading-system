@@ -836,7 +836,7 @@ function StrategyCard({
                 }`}
               >
                 {card.pick.netCredit >= 0 ? "Credit " : "Debit "}
-                {formatINR(Math.abs(card.pick.netCredit) * 75)}
+                {formatINR(Math.abs(card.pick.netCredit) * 65)}
               </span>
             </div>
             <ul className="space-y-0.5 font-mono text-[11px] text-slate-300">
@@ -1526,7 +1526,7 @@ function StrategyDetailModal({
             </div>
 
             <div className="mt-3 grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">
-              <KeyValue label="Net" value={formatINR(card.pick.netCredit * 75)} />
+              <KeyValue label="Net" value={formatINR(card.pick.netCredit * 65)} />
               <KeyValue label="Max P" value={formatINR(card.pick.maxProfit)} accent="green" />
               <KeyValue label="Max L" value={formatINR(card.pick.maxLoss)} accent="red" />
               <KeyValue

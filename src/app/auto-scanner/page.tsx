@@ -185,7 +185,7 @@ interface HistoryEntry {
 
 // ─── Constants ──────────────────────────────
 
-const NIFTY_OPTION_LOT = 75;
+const NIFTY_OPTION_LOT = 65;
 
 const REFRESH_OPTIONS = [
   { label: "5s", value: 5000 },

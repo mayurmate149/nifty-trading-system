@@ -9,7 +9,7 @@ import {
   type JournalStrategyContext,
 } from "@/server/journal/trade-journal-store";
 
-const DEFAULT_NIFTY_LOT = 75;
+const DEFAULT_NIFTY_LOT = 65;
 
 type ExecuteScanLeg = {
   action: "BUY" | "SELL";

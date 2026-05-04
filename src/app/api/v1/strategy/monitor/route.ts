@@ -15,11 +15,10 @@ import { buildStrategyMonitor } from "@/server/engine/strategy-monitor";
 import type { MarketIndicators } from "@/types/market";
 
 const USE_SIMULATOR = process.env.USE_SIMULATOR === "true";
-const NIFTY_LOT = 75;
+const NIFTY_LOT = 65;
 
 /**
  * GET /api/v1/strategy/monitor
- *
  * Pro Trader multi-strategy snapshot. Fetches the same data the auto-scanner
  * does (spot, OHLC, chain) + derives technicals and professional indicators
  * and evaluates each strategy's rule set against the combined context.

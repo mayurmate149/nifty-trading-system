@@ -123,7 +123,7 @@ export async function GET(request: NextRequest) {
         technicals,
         spot,
         capital,
-        lotSize: 75,
+        lotSize: 65,
         proBundle,
         fiiDii,
       });
