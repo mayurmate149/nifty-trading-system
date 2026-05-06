@@ -60,18 +60,14 @@ export default function DashboardPage() {
   const market = analytics?.market;
 
   return (
-    <div className="mx-auto max-w-7xl p-6">
-      {/* Page Title */}
-      <div className="mb-6 flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">🏠 Dashboard</h1>
-          <p className="text-sm text-gray-500">Portfolio overview & market analysis</p>
-        </div>
+    <div className="mx-auto max-w-7xl">
+      <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <p className="text-sm text-vz-muted">Portfolio overview & market analysis</p>
         <Link
           href="/positions"
-          className="rounded-lg bg-gray-800 px-4 py-2 text-sm font-medium text-gray-300 transition hover:bg-gray-700"
+          className="inline-flex items-center justify-center rounded-lg border border-white/[0.08] bg-vz-card px-4 py-2.5 text-sm font-medium text-vz-foreground shadow-sm transition hover:border-vz-primary/40 hover:bg-white/[0.04]"
         >
-          📊 Positions
+          Open positions →
         </Link>
       </div>
 

@@ -90,7 +90,6 @@ export default function OptionChainLivePage() {
     <div className="mx-auto max-w-7xl p-6">
       <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold">📡 Live options chain (WebSocket)</h1>
           <p className="text-sm text-gray-500">
             LTP / volume for each strike from 5paisa Xstream{" "}
             <code className="text-gray-400">MarketFeedV3</code> via the gateway. Structure

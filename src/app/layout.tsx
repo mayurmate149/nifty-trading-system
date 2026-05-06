@@ -1,7 +1,14 @@
 import type { Metadata } from "next";
+import { Inter } from "next/font/google";
 import "./globals.css";
 import { Providers } from "./providers";
-import { Navbar } from "@/components/Navbar";
+import { AppShell } from "@/components/AppShell";
+
+const inter = Inter({
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-inter",
+});
 
 export const metadata: Metadata = {
   title: "ANVI Trade Engine",
@@ -14,13 +21,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className="dark">
-      <body className="min-h-screen bg-gray-950 text-gray-100 antialiased">
+    <html lang="en" className={`dark ${inter.variable}`}>
+      <body className={`${inter.className} min-h-screen bg-vz-body text-vz-foreground`}>
         <Providers>
-          <Navbar />
-          <main className="flex min-h-screen flex-col">
-            {children}
-          </main>
+          <AppShell>{children}</AppShell>
         </Providers>
       </body>
     </html>

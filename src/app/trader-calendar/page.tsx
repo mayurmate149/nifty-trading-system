@@ -167,7 +167,6 @@ export default function TraderCalendarPage() {
           <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500">
             Risk &amp; session planning
           </p>
-          <h1 className="mt-1 text-3xl font-bold tracking-tight text-white">Trader calendar</h1>
           <p className="mt-2 max-w-xl text-sm text-slate-400">
             High-impact macro releases (US / India / major regions when configured) and{" "}
             <span className="text-violet-300">NSE cash &amp; F&amp;O closures</span>. Times shown in

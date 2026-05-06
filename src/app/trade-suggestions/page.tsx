@@ -88,12 +88,9 @@ export default function TradeSuggestionsPage() {
     <div className="mx-auto max-w-7xl p-4 sm:p-6">
       {/* Header */}
       <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">🎯 Trade Suggestions</h1>
-          <p className="mt-1 text-sm text-gray-400">
-            Options <span className="font-semibold text-orange-400">SELLER</span>-focused strategy scanner for NIFTY 50
-          </p>
-        </div>
+        <p className="text-sm text-gray-400">
+          Options <span className="font-semibold text-orange-400">SELLER</span>-focused strategy scanner for NIFTY 50
+        </p>
         <div className="flex items-center gap-3">
           <label className="text-xs text-gray-500">
             Min Score:

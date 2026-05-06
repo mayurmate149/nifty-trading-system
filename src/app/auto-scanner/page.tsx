@@ -334,13 +334,12 @@ export default function AutoScannerPage() {
       <header className="mb-8 border-b border-slate-800/80 pb-8">
         <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500">NIFTY F&amp;O</p>
-            <h1 className="mt-1 flex items-center gap-2 text-3xl font-bold tracking-tight text-white">
-              Strategy scanner
+            <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500">
+              NIFTY F&amp;O
               {isFetching && (
                 <span className="inline-block h-2.5 w-2.5 animate-pulse rounded-full bg-emerald-500" title="Updating" />
               )}
-            </h1>
+            </p>
             <p className="mt-2 max-w-lg text-sm leading-relaxed text-slate-400">
               Spreads, strangles, condors, and long options — grouped as <span className="text-slate-200">credit</span>,{" "}
               <span className="text-slate-200">debit</span>, or <span className="text-slate-200">short premium</span>. Bias

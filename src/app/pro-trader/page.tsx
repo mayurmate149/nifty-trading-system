@@ -337,8 +337,7 @@ export default function ProTraderPage() {
           <p className="text-[11px] font-semibold uppercase tracking-[0.25em] text-slate-500">
             NIFTY F&amp;O · Rule-based desk
           </p>
-          <h1 className="mt-1 flex items-center gap-3 text-3xl font-bold tracking-tight text-white">
-            Pro Trader
+          <div className="mt-2 flex flex-wrap items-center gap-2">
             <span
               className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium ${
                 isFetching
@@ -353,8 +352,8 @@ export default function ProTraderPage() {
               />
               {isFetching ? "Live" : "Idle"}
             </span>
-          </h1>
-          <p className="mt-1 max-w-2xl text-sm text-slate-400">
+          </div>
+          <p className="mt-2 max-w-2xl text-sm text-slate-400">
             Eight curated strategies monitored continuously against every proven
             technical (EMA 9/21, RSI, MACD, VWAP, SuperTrend, Bollinger,
             Stochastic, ROC, volume) plus full option-chain context (PCR, OI

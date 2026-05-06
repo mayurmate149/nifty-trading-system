@@ -162,15 +162,10 @@ export default function JournalPage() {
 
   return (
     <div className="mx-auto max-w-7xl p-6">
-      <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Trading journal</h1>
-          <p className="mt-1 text-sm text-gray-500">
-            Auto-logged from Pro Desk executions and book exits. Captures structure, Greeks, IV,
-            OI, market context — everything you need to review setups and refine discipline.
-          </p>
-        </div>
-      </div>
+      <p className="mb-6 max-w-2xl text-sm text-gray-500">
+        Auto-logged from Pro Desk executions and book exits. Captures structure, Greeks, IV,
+        OI, market context — everything you need to review setups and refine discipline.
+      </p>
 
       {!journalQ.isLoading && !mongoConfigured ? (
         <div className="mb-6 rounded-xl border border-amber-900/60 bg-amber-950/30 px-4 py-3 text-sm text-amber-100">

@@ -3,12 +3,25 @@
 @tailwind utilities;
 
 :root {
-  --background: #030712;
-  --foreground: #f9fafb;
+  --background: #0b1020;
+  --foreground: #e2e8f0;
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: system-ui, -apple-system, sans-serif;
+@layer base {
+  html {
+    @apply scroll-smooth;
+  }
+
+  body {
+    @apply min-h-screen antialiased;
+    background: var(--background);
+    color: var(--foreground);
+  }
+}
+
+/* Velzon-inspired focus states for accessibility */
+@layer utilities {
+  .focus-ring {
+    @apply outline-none ring-2 ring-vz-primary/50 ring-offset-2 ring-offset-vz-body;
+  }
 }

@@ -42,8 +42,6 @@ export default function BacktestPage() {
 
   return (
     <div className="mx-auto max-w-7xl p-6">
-      <h1 className="mb-6 text-2xl font-bold">🔬 Backtesting</h1>
-
       {/* Parameter Form */}
       <div className="mb-8 grid grid-cols-2 gap-6 rounded-lg border border-gray-800 bg-gray-900 p-6 md:grid-cols-4">
         <div>

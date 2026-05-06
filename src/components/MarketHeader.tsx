@@ -20,13 +20,19 @@ export function MarketHeader({ indicators, bankNifty }: MarketHeaderProps) {
   const isLive = rt?.connection === "open";
   if (!indicators) {
     return (
-      <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        {Array.from({ length: 6 }).map((_, i) => (
-          <div key={i} className="animate-pulse rounded-lg border border-gray-800 bg-gray-900 p-4">
-            <div className="mb-2 h-3 w-12 rounded bg-gray-800" />
-            <div className="h-6 w-20 rounded bg-gray-800" />
-          </div>
-        ))}
+      <div className="mb-6 rounded-xl border border-white/[0.08] bg-black/20 p-3 sm:p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.06] pb-3">
+          <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-vz-muted">Market</span>
+          <span className="inline-block h-7 w-28 animate-pulse rounded-lg bg-white/[0.06]" aria-hidden />
+        </div>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} className="animate-pulse rounded-lg border border-white/[0.06] bg-white/[0.03] p-4">
+              <div className="mb-2 h-3 w-12 rounded bg-white/[0.08]" />
+              <div className="h-6 w-20 rounded bg-white/[0.08]" />
+            </div>
+          ))}
+        </div>
       </div>
     );
   }
@@ -91,33 +97,32 @@ export function MarketHeader({ indicators, bankNifty }: MarketHeaderProps) {
   ];
 
   return (
-    <>
-    <div className="mb-3 flex items-center justify-end gap-2 text-xs text-gray-500">
-      {isLive && (
-        <span className="inline-flex items-center gap-1 rounded border border-emerald-800/80 bg-emerald-950/40 px-2 py-0.5 font-medium text-emerald-400">
-          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
-          Realtime (WS)
-        </span>
-      )}
-    </div>
-    <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-      {cards.map((card, i) => (
-        <div
-          key={i}
-          className={`rounded-lg border border-gray-800 bg-gray-900 p-3 transition hover:border-gray-700 ${card.badge ?? ""}`}
-        >
-          <div className="mb-1 text-[11px] font-medium uppercase tracking-wider text-gray-500">
-            {card.label}
+    <section className="mb-6 rounded-xl border border-white/[0.08] bg-vz-card/35 p-3 shadow-sm sm:p-4" aria-label="Market snapshot">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.06] pb-3">
+        <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-vz-muted">Market</span>
+        {isLive ? (
+          <span className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-medium text-emerald-300">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" aria-hidden />
+            Realtime (WS)
+          </span>
+        ) : (
+          <span className="text-[11px] text-vz-muted">Polling / REST</span>
+        )}
+      </div>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+        {cards.map((card, i) => (
+          <div
+            key={i}
+            className={`rounded-lg border border-white/[0.06] bg-black/25 p-3 transition hover:border-white/[0.1] ${card.badge ?? ""}`}
+          >
+            <div className="mb-1 text-[11px] font-medium uppercase tracking-wider text-vz-muted">
+              {card.label}
+            </div>
+            <div className={`text-lg font-bold ${card.valueColor ?? "text-gray-100"}`}>{card.value}</div>
+            {card.sub && <div className={`mt-0.5 text-xs ${card.subColor}`}>{card.sub}</div>}
           </div>
-          <div className={`text-lg font-bold ${card.valueColor ?? "text-gray-100"}`}>
-            {card.value}
-          </div>
-          {card.sub && (
-            <div className={`mt-0.5 text-xs ${card.subColor}`}>{card.sub}</div>
-          )}
-        </div>
-      ))}
-    </div>
-    </>
+        ))}
+      </div>
+    </section>
   );
 }
