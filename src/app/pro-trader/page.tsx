@@ -366,6 +366,12 @@ export default function ProTraderPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          <Link
+            href="/trader-calendar"
+            className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-medium text-slate-300 hover:border-violet-500/50 hover:text-violet-200"
+          >
+            📅 Calendar
+          </Link>
           <button
             type="button"
             onClick={askNotifs}

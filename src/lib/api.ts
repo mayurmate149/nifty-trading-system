@@ -54,6 +54,33 @@ export const api = {
     indicators: () => apiFetch("/market/indicators"),
     ohlc: (symbol: string, interval: string, days: number) =>
       apiFetch(`/market/ohlc?symbol=${symbol}&interval=${interval}&days=${days}`),
+    traderCalendar: (params?: { month?: string; from?: string; to?: string }) => {
+      const q = new URLSearchParams();
+      if (params?.month) q.set("month", params.month);
+      if (params?.from) q.set("from", params.from);
+      if (params?.to) q.set("to", params.to);
+      const suffix = q.toString() ? `?${q}` : "";
+      return apiFetch<{
+        generatedAt: string;
+        from: string;
+        to: string;
+        events: Array<{
+          id: string;
+          date: string;
+          timeIst: string | null;
+          region: string;
+          title: string;
+          impact: string;
+          kind: string;
+          forecast: string | null;
+          previous: string | null;
+          actual: string | null;
+          source: string;
+        }>;
+        sources: string[];
+        notice?: string;
+      }>(`/market/trader-calendar${suffix}`);
+    },
   },
 
   // ─── Strategy ────────────────────────────────
